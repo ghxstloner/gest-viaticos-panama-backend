@@ -55,7 +55,6 @@ class ConfiguracionSistema(Base, TimestampMixin):
     tipo_dato: Mapped[str] = mapped_column(String(20), default="STRING")
     descripcion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     es_modificable: Mapped[bool] = mapped_column(Boolean, default=True)
-    fecha_actualizacion: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), onupdate=func.now())
 
 
 class Mision(Base, TimestampMixin):
@@ -76,8 +75,6 @@ class Mision(Base, TimestampMixin):
     numero_gestion_cobro: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     observaciones_especiales: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     fecha_limite_presentacion: Mapped[Optional[Date]] = mapped_column(Date, nullable=True)
-    fecha_creacion: Mapped[DateTime] = mapped_column(DateTime, default=func.now())
-    ultima_actualizacion: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), onupdate=func.now())
 
     # Relationships
     estado_flujo: Mapped["EstadoFlujo"] = relationship("EstadoFlujo", back_populates="misiones")

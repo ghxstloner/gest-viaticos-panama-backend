@@ -16,7 +16,6 @@ class Rol(Base, TimestampMixin):
     nombre_rol: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     descripcion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     permisos_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
-    fecha_creacion: Mapped[DateTime] = mapped_column(DateTime, default=func.now())
 
     # ✅ Usar strings para forward references
     usuarios: Mapped[List["Usuario"]] = relationship("Usuario", back_populates="rol")
@@ -33,8 +32,6 @@ class Usuario(Base, TimestampMixin):
     id_rol: Mapped[int] = mapped_column(Integer, ForeignKey("roles.id_rol"), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     ultimo_acceso: Mapped[Optional[DateTime]] = mapped_column(DateTime, nullable=True)
-    fecha_creacion: Mapped[DateTime] = mapped_column(DateTime, default=func.now())
-    fecha_actualizacion: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), onupdate=func.now())
 
     # ✅ Usar strings para forward references
     rol: Mapped["Rol"] = relationship("Rol", back_populates="usuarios")
