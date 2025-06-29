@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: gest_viaticos_mysql
+    environment:
+      MYSQL_DATABASE: gest_viaticos
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_USER: gestuser
+      MYSQL_PASSWORD: gestpass
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    restart: unless-stopped
+
+  # postgresql:
+  #   image: postgres:15
+  #   container_name: gest_viaticos_postgres
+  #   environment:
+  #     POSTGRES_DB: gest_viaticos
+  #     POSTGRES_USER: gestuser
+  #     POSTGRES_PASSWORD: gestpass
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - postgres_data:/var/lib/postgresql/data
+  #   restart: unless-stopped
+
+  app:
+    build: .
+    container_name: gest_viaticos_api
+    ports:
+      - "8000:8000"
+    depends_on:
+      - mysql
+    environment:
+      - DATABASE_URL=mysql+mysqlconnector://gestuser:gestpass@mysql:3306/gest_viaticos
+    volumes:
+      - .:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+volumes:
+  mysql_data:
+  # postgres_data:

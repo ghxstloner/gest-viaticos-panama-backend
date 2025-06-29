@@ -1,0 +1,84 @@
+# ###########################
+# ## Entornos Virtuales Python
+# ###########################
+venv/
+env/
+.venv/
+.env/
+
+# #######################################
+# ## Archivos Sensibles y de Configuración
+# #######################################
+.env
+.env.*
+!.env.example # A menudo se incluye un archivo de ejemplo, que SÍ debe subirse.
+
+# ################################
+# ## Bytecode y Caché de Python
+# ################################
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# #####################################
+# ## Artefactos de Distribución/Build
+# #####################################
+build/
+dist/
+*.egg-info/
+sdist/
+wheelhouse/
+pip-wheel-metadata/
+
+# ##############################
+# ## Bases de Datos Locales
+# ##############################
+*.db
+*.sqlite
+*.sqlite3
+
+# ######################################
+# ## Reportes de Pruebas y Cobertura
+# ######################################
+.pytest_cache/
+.tox/
+htmlcov/
+.coverage
+.coverage.*
+nosetests.xml
+coverage.xml
+
+# ####################################
+# ## Archivos de IDE y Editores
+# ####################################
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+
+# JetBrains / PyCharm
+.idea/
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# ###############################
+# ## Archivos del Sistema Operativo
+# ###############################
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ###################
+# ## Archivos de Log
+# ###################
+*.log
+logs/
+*.log.*
