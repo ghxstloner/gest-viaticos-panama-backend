@@ -1,25 +1,69 @@
-from typing import Generator, Optional
+# app/api/deps.py
+
+from typing import Generator
 from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from sqlalchemy.orm import Session
+from fastapi.security import OAuth2PasswordBearer, HTTPAuthorizationCredentials, HTTPBearer
 from jose import jwt, JWTError
+from sqlalchemy.orm import Session
+from sqlalchemy import text
 
-from ..core.database import get_db
-from ..core.config import settings
-from ..models.user import Usuario
-from ..services.auth import AuthService
+from app.core.config import settings
+from app.models.User import User
+# ✅ Se importan las nuevas dependencias de BD
+from app.core.database import SessionLocal_financiero, get_db_rrhh
 
+# Esquema de seguridad para los endpoints
 security = HTTPBearer()
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_STR}/auth/login/financiero")
 
+def get_db() -> Generator:
+    db = SessionLocal_financiero()
+    try:
+        yield db
+    finally:
+        db.close()
 
 def get_current_user(
     db: Session = Depends(get_db),
-    credentials: HTTPAuthorizationCredentials = Depends(security)
-) -> Usuario:
-    """Get current authenticated user"""
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+) -> User:
+    """
+    Obtiene el usuario actual (del sistema financiero) a partir del token JWT.
+    """
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(
+            credentials.credentials, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
+        )
+        username: str = payload.get("sub")
+        if username is None or not username.startswith("user:"):
+             raise credentials_exception
+        
+        user_id = int(username.split(":")[1])
+        
+    except (JWTError, IndexError, ValueError):
+        raise credentials_exception
+        
+    user = db.get(User, user_id)
+    if user is None:
+        raise credentials_exception
+    return user
+
+
+def get_current_employee(
+    db: Session = Depends(get_db_rrhh),
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+) -> dict:
+    """
+    ✅ NUEVO: Obtiene el empleado actual (de RRHH) a partir del token JWT.
+    """
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="No se pudieron validar las credenciales del empleado",
         headers={"WWW-Authenticate": "Bearer"},
     )
     
@@ -29,54 +73,22 @@ def get_current_user(
             settings.SECRET_KEY, 
             algorithms=[settings.ALGORITHM]
         )
-        username: str = payload.get("sub")
-        if username is None:
+        # El subject debe tener el formato "employee:cedula"
+        subject: str = payload.get("sub")
+        if subject is None or not subject.startswith("employee:"):
             raise credentials_exception
-    except JWTError:
+            
+        cedula = subject.split(":")[1]
+        
+    except (JWTError, IndexError):
         raise credentials_exception
     
-    auth_service = AuthService(db)
-    user = auth_service.get_user_by_username(username)
-    if user is None:
+    # Verificamos que el empleado todavía existe y está activo en la BD
+    query = text("SELECT personal_id, cedula, apenom, email FROM nompersonal WHERE cedula = :cedula AND estado != 'De Baja'")
+    result = db.execute(query, {"cedula": cedula})
+    employee = result.fetchone()
+
+    if employee is None:
         raise credentials_exception
-    
-    return user
-
-
-def get_current_active_user(
-    current_user: Usuario = Depends(get_current_user)
-) -> Usuario:
-    """Get current active user"""
-    if not current_user.is_active:
-        raise HTTPException(status_code=400, detail="Inactive user")
-    return current_user
-
-
-def get_admin_user(
-    current_user: Usuario = Depends(get_current_active_user)
-) -> Usuario:
-    """Require admin role"""
-    if current_user.rol.nombre_rol != "Administrador Sistema":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not enough permissions"
-        )
-    return current_user
-
-
-def get_finance_user(
-    current_user: Usuario = Depends(get_current_active_user)
-) -> Usuario:
-    """Require finance related roles"""
-    allowed_roles = [
-        "Administrador Sistema",
-        "Director Finanzas",
-        "Analista Tesorería",
-        "Analista Contabilidad"
-    ]
-    if current_user.rol.nombre_rol not in allowed_roles:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not enough permissions"
-        )
-    return current_user
+        
+    return dict(employee._mapping)
