@@ -8,25 +8,18 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from app.core.config import settings
-from app.models.User import User
-# ✅ Se importan las nuevas dependencias de BD
-from app.core.database import SessionLocal_financiero, get_db_rrhh
+# ✅ CORRECCIÓN: usar user en minúscula
+from app.models.user import Usuario
+from app.core.database import get_db_financiero, get_db_rrhh
 
 # Esquema de seguridad para los endpoints
 security = HTTPBearer()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_STR}/auth/login/financiero")
 
-def get_db() -> Generator:
-    db = SessionLocal_financiero()
-    try:
-        yield db
-    finally:
-        db.close()
-
 def get_current_user(
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_financiero),
     credentials: HTTPAuthorizationCredentials = Depends(security),
-) -> User:
+) -> Usuario:
     """
     Obtiene el usuario actual (del sistema financiero) a partir del token JWT.
     """
@@ -48,7 +41,7 @@ def get_current_user(
     except (JWTError, IndexError, ValueError):
         raise credentials_exception
         
-    user = db.get(User, user_id)
+    user = db.get(Usuario, user_id)
     if user is None:
         raise credentials_exception
     return user
@@ -59,7 +52,7 @@ def get_current_employee(
     credentials: HTTPAuthorizationCredentials = Depends(security)
 ) -> dict:
     """
-    ✅ NUEVO: Obtiene el empleado actual (de RRHH) a partir del token JWT.
+    Obtiene el empleado actual (de RRHH) a partir del token JWT.
     """
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -73,7 +66,6 @@ def get_current_employee(
             settings.SECRET_KEY, 
             algorithms=[settings.ALGORITHM]
         )
-        # El subject debe tener el formato "employee:cedula"
         subject: str = payload.get("sub")
         if subject is None or not subject.startswith("employee:"):
             raise credentials_exception
@@ -83,7 +75,6 @@ def get_current_employee(
     except (JWTError, IndexError):
         raise credentials_exception
     
-    # Verificamos que el empleado todavía existe y está activo en la BD
     query = text("SELECT personal_id, cedula, apenom, email FROM nompersonal WHERE cedula = :cedula AND estado != 'De Baja'")
     result = db.execute(query, {"cedula": cedula})
     employee = result.fetchone()

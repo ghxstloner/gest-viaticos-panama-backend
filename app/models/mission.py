@@ -1,10 +1,14 @@
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text, JSON, Numeric, BigInteger, Date
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 from sqlalchemy.sql import func
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
 from decimal import Decimal
 from .base import Base, TimestampMixin
 from .enums import TipoMision, TipoFlujo, TipoAccion, EstadoGestion, TipoDocumento, EstadoSubsanacion
+
+# ✅ Solo importar para type checking, evita referencias circulares
+if TYPE_CHECKING:
+    from .user import Rol, Usuario
 
 
 class EstadoFlujo(Base):
@@ -36,7 +40,7 @@ class TransicionFlujo(Base):
     tipo_accion: Mapped[TipoAccion] = mapped_column(String(20), nullable=False)
     es_activa: Mapped[bool] = mapped_column(Boolean, default=True)
 
-    # Relationships
+    # ✅ Usar strings para forward references
     estado_origen: Mapped["EstadoFlujo"] = relationship("EstadoFlujo", foreign_keys=[id_estado_origen], back_populates="transiciones_origen")
     estado_destino: Mapped["EstadoFlujo"] = relationship("EstadoFlujo", foreign_keys=[id_estado_destino], back_populates="transiciones_destino")
     rol_autorizado: Mapped["Rol"] = relationship("Rol", back_populates="transiciones_flujo")
@@ -98,7 +102,7 @@ class GestionCobro(Base):
     observaciones: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     estado: Mapped[EstadoGestion] = mapped_column(String(20), default=EstadoGestion.PENDIENTE)
 
-    # Relationships
+    # ✅ Usar strings para forward references
     mision: Mapped["Mision"] = relationship("Mision", back_populates="gestiones_cobro")
     usuario_genero: Mapped["Usuario"] = relationship("Usuario", back_populates="gestiones_cobro")
 
@@ -149,7 +153,7 @@ class Adjunto(Base):
     id_usuario_subio: Mapped[int] = mapped_column(Integer, ForeignKey("usuarios.id_usuario"), nullable=False)
     fecha_carga: Mapped[DateTime] = mapped_column(DateTime, default=func.now())
 
-    # Relationships
+    # ✅ Usar strings para forward references
     mision: Mapped["Mision"] = relationship("Mision", back_populates="adjuntos")
     usuario_subio: Mapped["Usuario"] = relationship("Usuario", back_populates="adjuntos_subidos")
 
@@ -168,7 +172,7 @@ class HistorialFlujo(Base):
     datos_adicionales: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     ip_usuario: Mapped[Optional[str]] = mapped_column(String(45), nullable=True)
 
-    # Relationships
+    # ✅ Usar strings para forward references
     mision: Mapped["Mision"] = relationship("Mision", back_populates="historial_flujo")
     usuario_accion: Mapped["Usuario"] = relationship("Usuario", back_populates="historial_flujo")
     estado_anterior: Mapped[Optional["EstadoFlujo"]] = relationship("EstadoFlujo", foreign_keys=[id_estado_anterior], back_populates="historial_flujo_anterior")
@@ -189,11 +193,7 @@ class Subsanacion(Base):
     respuesta: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     estado: Mapped[EstadoSubsanacion] = mapped_column(String(20), default=EstadoSubsanacion.PENDIENTE)
 
-    # Relationships
+    # ✅ Usar strings para forward references
     mision: Mapped["Mision"] = relationship("Mision", back_populates="subsanaciones")
     usuario_solicita: Mapped["Usuario"] = relationship("Usuario", foreign_keys=[id_usuario_solicita], back_populates="subsanaciones_solicitadas")
     usuario_responsable: Mapped["Usuario"] = relationship("Usuario", foreign_keys=[id_usuario_responsable], back_populates="subsanaciones_responsables")
-
-
-# Import all models to ensure they are registered
-from .user import Rol, Usuario

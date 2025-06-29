@@ -1,8 +1,9 @@
 from typing import List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import text
+# ✅ CORRECCIÓN: usar user en minúscula
 from ..models.user import Usuario, Rol
-from ..schemas.user import UsuarioCreate, UsuarioUpdate
+from ..schemas.User import UsuarioCreate, UsuarioUpdate
 from ..core.security import get_password_hash
 from fastapi import HTTPException, status
 
@@ -121,7 +122,7 @@ class UserService:
             result = self.db.execute(text("""
                 SELECT personal_id 
                 FROM aitsa_rrhh.nompersonal 
-                WHERE personal_id = :personal_id AND estado = 'ACTIVO'
+                WHERE personal_id = :personal_id AND estado != 'De Baja'
             """), {"personal_id": personal_id})
             
             return result.fetchone() is not None

@@ -4,13 +4,13 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 from typing import Generator
 from app.core.config import settings
-from app.models.base import Base  # Asegúrate de que tus modelos hereden de esta Base
+from app.models.base import Base
 
 # --- Motor para la BD Financiera ---
 engine_financiero = create_engine(
     settings.DATABASE_URL,
     pool_pre_ping=True,
-    echo=False  # Poner en True para ver las queries SQL en la consola
+    echo=False
 )
 SessionLocal_financiero = sessionmaker(autocommit=False, autoflush=False, bind=engine_financiero)
 
@@ -18,12 +18,9 @@ SessionLocal_financiero = sessionmaker(autocommit=False, autoflush=False, bind=e
 engine_rrhh = create_engine(
     settings.RRHH_DATABASE_URL,
     pool_pre_ping=True,
-    echo=False # Poner en True para ver las queries SQL en la consola
+    echo=False
 )
 SessionLocal_rrhh = sessionmaker(autocommit=False, autoflush=False, bind=engine_rrhh)
-
-
-# --- Funciones de Dependencia para los Endpoints ---
 
 def get_db_financiero() -> Generator[Session, None, None]:
     """

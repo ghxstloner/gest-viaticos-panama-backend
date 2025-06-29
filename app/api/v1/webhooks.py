@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Header
 from sqlalchemy.orm import Session
 
-from ...core.database import get_db
+# ✅ CORRECCIÓN: Usar get_db_financiero
+from ...core.database import get_db_financiero
 from ...core.config import settings
 from ...schemas.mission import WebhookMisionAprobada, Mision
 from ...services.mission import MissionService
@@ -12,7 +13,7 @@ router = APIRouter()
 @router.post("/rrhh/mission-approved", response_model=dict)
 async def handle_mission_approved(
     payload: WebhookMisionAprobada,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_financiero),  # ✅ Usar get_db_financiero
     x_webhook_secret: str = Header(None)
 ):
     """Handle webhook for mission approved from RRHH"""

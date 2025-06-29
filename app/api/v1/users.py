@@ -2,10 +2,11 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from ...core.database import get_db
-from ...schemas.user import Usuario, UsuarioCreate, UsuarioUpdate, Rol
+from ...core.database import get_db_financiero
+from ...schemas.User import Usuario, UsuarioCreate, UsuarioUpdate, Rol
 from ...services.user import UserService
-from ...api.deps import get_admin_user, get_finance_user
+from ...api.deps import get_current_user
+# ✅ CORRECCIÓN: usar user en minúscula
 from ...models.user import Usuario as UsuarioModel
 
 router = APIRouter()
@@ -14,8 +15,8 @@ router = APIRouter()
 @router.post("/", response_model=Usuario)
 async def create_user(
     user_data: UsuarioCreate,
-    db: Session = Depends(get_db),
-    current_user: UsuarioModel = Depends(get_admin_user)
+    db: Session = Depends(get_db_financiero),
+    current_user: UsuarioModel = Depends(get_current_user)
 ):
     """Create new user (Admin only)"""
     user_service = UserService(db)
@@ -26,8 +27,8 @@ async def create_user(
 async def get_users(
     skip: int = 0,
     limit: int = 100,
-    db: Session = Depends(get_db),
-    current_user: UsuarioModel = Depends(get_finance_user)
+    db: Session = Depends(get_db_financiero),
+    current_user: UsuarioModel = Depends(get_current_user)
 ):
     """Get all users"""
     user_service = UserService(db)
@@ -36,8 +37,8 @@ async def get_users(
 
 @router.get("/roles", response_model=List[Rol])
 async def get_roles(
-    db: Session = Depends(get_db),
-    current_user: UsuarioModel = Depends(get_finance_user)
+    db: Session = Depends(get_db_financiero),
+    current_user: UsuarioModel = Depends(get_current_user)
 ):
     """Get all roles"""
     user_service = UserService(db)
@@ -47,8 +48,8 @@ async def get_roles(
 @router.get("/{user_id}", response_model=Usuario)
 async def get_user(
     user_id: int,
-    db: Session = Depends(get_db),
-    current_user: UsuarioModel = Depends(get_finance_user)
+    db: Session = Depends(get_db_financiero),
+    current_user: UsuarioModel = Depends(get_current_user)
 ):
     """Get user by ID"""
     user_service = UserService(db)
@@ -65,8 +66,8 @@ async def get_user(
 async def update_user(
     user_id: int,
     user_data: UsuarioUpdate,
-    db: Session = Depends(get_db),
-    current_user: UsuarioModel = Depends(get_admin_user)
+    db: Session = Depends(get_db_financiero),
+    current_user: UsuarioModel = Depends(get_current_user)
 ):
     """Update user (Admin only)"""
     user_service = UserService(db)
@@ -76,8 +77,8 @@ async def update_user(
 @router.patch("/{user_id}/toggle-active", response_model=Usuario)
 async def toggle_user_active(
     user_id: int,
-    db: Session = Depends(get_db),
-    current_user: UsuarioModel = Depends(get_admin_user)
+    db: Session = Depends(get_db_financiero),
+    current_user: UsuarioModel = Depends(get_current_user)
 ):
     """Toggle user active status (Admin only)"""
     user_service = UserService(db)
