@@ -1,5 +1,5 @@
-from pydantic import BaseModel, ConfigDict
-from typing import Optional, List
+from pydantic import BaseModel, ConfigDict, Field
+from typing import Optional, List, Dict, Any
 from datetime import datetime, date
 from decimal import Decimal
 from ..models.enums import TipoMision, TipoAccion, EstadoGestion, TipoDocumento, EstadoSubsanacion
@@ -131,3 +131,116 @@ class HistorialFlujo(HistorialFlujoBase):
     id_estado_nuevo: int
     fecha_accion: datetime
     ip_usuario: Optional[str] = None
+
+class MisionListItem(BaseModel):
+    """Item de misión para listados"""
+    model_config = ConfigDict(from_attributes=True)
+    
+    id_mision: int
+    solicitud_caso_id_rrhh: int
+    tipo_mision: TipoMision
+    beneficiario_personal_id: int
+    beneficiario_nombre: Optional[str] = None
+    objetivo_mision: str
+    destino_mision: str
+    fecha_salida: datetime
+    fecha_retorno: datetime
+    monto_total_calculado: Decimal
+    monto_aprobado: Optional[Decimal] = None
+    estado_actual: str
+    dias_en_estado: int
+    requiere_accion: bool = False
+    
+class MisionListResponse(BaseModel):
+    """Respuesta paginada de misiones"""
+    total: int
+    missions: List[MisionListItem]
+    skip: int
+    limit: int
+    
+class MisionDetail(BaseModel):
+    """Detalle completo de una misión"""
+    mission: Mision
+    beneficiary: Dict[str, Any]
+    available_actions: List[str]
+    can_edit: bool
+    can_delete: bool
+    
+class SubsanacionRequest(BaseModel):
+    """Solicitud de subsanación"""
+    respuesta: str = Field(..., min_length=10, max_length=2000)
+    
+class SubsanacionResponse(BaseModel):
+    """Respuesta de subsanación"""
+    model_config = ConfigDict(from_attributes=True)
+    
+    subsanacion: Any  # Subsanacion model
+    mission_status: str
+    
+class GestionCobroCreate(BaseModel):
+    """Crear gestión de cobro"""
+    monto_autorizado: Optional[Decimal] = None
+    codigo_presupuestario: Optional[str] = None
+    observaciones: Optional[str] = None
+    
+class AttachmentUpload(BaseModel):
+    """Respuesta de carga de archivo"""
+    id_adjunto: int
+    nombre_archivo: str
+    url: str
+    
+class DashboardStats(BaseModel):
+    """Estadísticas del dashboard"""
+    resumen: Dict[str, Any]
+    por_estado: List[Dict[str, Any]]
+    por_tipo: List[Dict[str, Any]]
+    tendencia_mensual: List[Dict[str, Any]]
+    proximas_acciones: List[Dict[str, Any]]
+    alertas: List[Dict[str, Any]]
+    resumen_financiero: Optional[Dict[str, Any]] = None
+    pagos_pendientes: Optional[Dict[str, Any]] = None
+
+class WorkflowState(BaseModel):
+    """Estado del flujo de trabajo"""
+    model_config = ConfigDict(from_attributes=True)
+    
+    id_estado_flujo: int
+    nombre_estado: str
+    descripcion: Optional[str]
+    es_estado_final: bool
+    orden_flujo: Optional[int]
+    
+class WorkflowTransition(BaseModel):
+    """Transición del flujo"""
+    model_config = ConfigDict(from_attributes=True)
+    
+    id_transicion: int
+    estado_origen: WorkflowState
+    estado_destino: WorkflowState
+    tipo_accion: TipoAccion
+    rol_requerido: str
+
+
+class SubsanacionBase(BaseModel):
+    """Base para subsanación"""
+    motivo: str
+    fecha_limite: date
+    respuesta: Optional[str] = None
+
+
+class Subsanacion(SubsanacionBase):
+    """Esquema de subsanación"""
+    model_config = ConfigDict(from_attributes=True)
+    
+    id_subsanacion: int
+    id_mision: int
+    id_usuario_solicita: int
+    id_usuario_responsable: int
+    fecha_solicitud: datetime
+    fecha_respuesta: Optional[datetime] = None
+    estado: EstadoSubsanacion
+
+
+class SubsanacionCreate(SubsanacionBase):
+    """Crear subsanación"""
+    id_usuario_responsable: int
