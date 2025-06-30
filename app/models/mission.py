@@ -46,15 +46,7 @@ class TransicionFlujo(Base):
     rol_autorizado: Mapped["Rol"] = relationship("Rol", back_populates="transiciones_flujo")
 
 
-class ConfiguracionSistema(Base, TimestampMixin):
-    __tablename__ = "configuraciones_sistema"
-
-    id_configuracion: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    clave: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
-    valor: Mapped[str] = mapped_column(Text, nullable=False)
-    tipo_dato: Mapped[str] = mapped_column(String(20), default="STRING")
-    descripcion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    es_modificable: Mapped[bool] = mapped_column(Boolean, default=True)
+# ConfiguracionSistema se define en configuration.py
 
 
 class Mision(Base, TimestampMixin):

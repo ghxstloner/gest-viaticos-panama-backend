@@ -1,11 +1,16 @@
 # app/main.py
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware  # ← Agregar esto
+from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1 import api_router
 from app.core.config import settings
 from app.models.base import Base
 from app.core.database import engine_financiero
+
+# Importar todos los modelos para que SQLAlchemy los reconozca
+from app.models.user import Usuario, Rol
+from app.models.mission import *
+from app.models.configuration import ConfiguracionGeneral, ConfiguracionSistema  # ← NUEVO
 
 Base.metadata.create_all(bind=engine_financiero)
 
@@ -16,10 +21,10 @@ app = FastAPI(
     description="API para la Gestión de Viáticos y Solicitudes de AITSA",
 )
 
-# ✅ CONFIGURACIÓN DE CORS
+# Configuración de CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.ALLOWED_ORIGINS,  # ← Usar la configuración del .env
+    allow_origins=settings.ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["*"],
