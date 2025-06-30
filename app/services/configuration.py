@@ -285,3 +285,37 @@ class ConfigurationService:
             result[config.clave] = value
         
         return result
+
+    def ensure_default_configurations(self):
+        """Asegurar que las configuraciones por defecto existan"""
+        default_configs = [
+            {
+                "clave": "LIMITE_EFECTIVO_VIATICOS",
+                "valor": "200.00",
+                "tipo_dato": "NUMBER",
+                "descripcion": "Límite máximo para pago de viáticos en efectivo (B/.)",
+                "es_modificable": True
+            },
+            {
+                "clave": "DIAS_LIMITE_PRESENTACION",
+                "valor": "10",
+                "tipo_dato": "NUMBER", 
+                "descripcion": "Días mínimos de anticipación para solicitar viáticos",
+                "es_modificable": True
+            },
+            {
+                "clave": "MONTO_REFRENDO_CGR",
+                "valor": "1000.00",
+                "tipo_dato": "NUMBER",
+                "descripcion": "Monto mínimo que requiere refrendo de CGR (B/.)",
+                "es_modificable": True
+            }
+        ]
+        
+        for config_data in default_configs:
+            existing = self.get_configuracion_sistema_by_clave(config_data["clave"])
+            if not existing:
+                db_config = ConfiguracionSistema(**config_data)
+                self.db.add(db_config)
+        
+        self.db.commit()

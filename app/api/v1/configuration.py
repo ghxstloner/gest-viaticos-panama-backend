@@ -179,6 +179,8 @@ async def get_configuraciones_sistema_dict(
 ):
     """Obtiene todas las configuraciones como diccionario clave-valor"""
     service = ConfigurationService(db)
+    # Asegurar que las configuraciones por defecto existan
+    service.ensure_default_configurations()
     return service.get_configuraciones_as_dict()
 
 @router.get("/sistema/{clave}", response_model=ConfiguracionSistema)

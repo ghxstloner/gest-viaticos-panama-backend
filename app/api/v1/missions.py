@@ -10,20 +10,16 @@ from ...schemas.mission import (
     MisionCreate, MisionUpdate, MisionApprovalRequest, 
     MisionRejectionRequest, MisionListResponse, MisionDetail,
     SubsanacionRequest, SubsanacionResponse, GestionCobroCreate,
-    AttachmentUpload, WorkflowState, Subsanacion
-)
-from ...schemas.mission import (
-    MisionCreate, MisionUpdate, MisionApprovalRequest, 
-    MisionRejectionRequest, MisionListResponse, MisionDetail,
-    SubsanacionRequest, SubsanacionResponse, GestionCobroCreate,
     AttachmentUpload, WorkflowState, Subsanacion, Mision as MisionResponse
 )
-from ...models.mission import Mision as MisionModel
+from ...models.mission import (
+    Mision as MisionModel, GestionCobro, Adjunto, 
+    Subsanacion as SubsanacionModel, EstadoFlujo
+)
 from ...services.mission import MissionService
 from ...api.deps import get_current_user
 from ...models.user import Usuario
 from ...models.enums import TipoMision, TipoDocumento
-from ...models.mission import Adjunto
 
 router = APIRouter()
 
@@ -149,8 +145,6 @@ async def get_workflow_states(
     current_user: Usuario = Depends(get_current_user)
 ):
     """Obtener estados del flujo de trabajo"""
-    from ...models.mission import EstadoFlujo
-    
     estados = db.query(EstadoFlujo).order_by(EstadoFlujo.orden_flujo).all()
     return estados
 
@@ -196,7 +190,7 @@ async def update_mission(
     mission_service = MissionService(db)
     
     # Verificar que existe
-    mission = db.query(Mision).filter(Mision.id_mision == mission_id).first()
+    mission = db.query(MisionModel).filter(MisionModel.id_mision == mission_id).first()
     if not mission:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -233,7 +227,7 @@ async def delete_mission(
     current_user: Usuario = Depends(get_current_user)
 ):
     """Eliminar misión (solo en estado inicial sin historial)"""
-    mission = db.query(Mision).filter(Mision.id_mision == mission_id).first()
+    mission = db.query(MisionModel).filter(MisionModel.id_mision == mission_id).first()
     if not mission:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -265,7 +259,7 @@ async def delete_mission(
     return {"message": "Misión eliminada exitosamente"}
 
 
-@router.post("/{mission_id}/approve", response_model=Mision)
+@router.post("/{mission_id}/approve", response_model=MisionResponse)
 async def approve_mission(
     mission_id: int,
     approval_data: MisionApprovalRequest,
@@ -288,7 +282,7 @@ async def approve_mission(
     return mission
 
 
-@router.post("/{mission_id}/reject", response_model=Mision)
+@router.post("/{mission_id}/reject", response_model=MisionResponse)
 async def reject_mission(
     mission_id: int,
     rejection_data: MisionRejectionRequest,
@@ -337,9 +331,9 @@ async def get_mission_subsanations(
     current_user: Usuario = Depends(get_current_user)
 ):
     """Obtener subsanaciones de una misión"""
-    subsanations = db.query(Subsanacion).filter(
-        Subsanacion.id_mision == mission_id
-    ).order_by(Subsanacion.fecha_solicitud.desc()).all()
+    subsanations = db.query(SubsanacionModel).filter(
+        SubsanacionModel.id_mision == mission_id
+    ).order_by(SubsanacionModel.fecha_solicitud.desc()).all()
     
     return subsanations
 
@@ -381,7 +375,7 @@ async def upload_attachment(
 ):
     """Subir archivo adjunto a una misión"""
     # Verificar que la misión existe
-    mission = db.query(Mision).filter(Mision.id_mision == mission_id).first()
+    mission = db.query(MisionModel).filter(MisionModel.id_mision == mission_id).first()
     if not mission:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
