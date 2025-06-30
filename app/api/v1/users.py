@@ -3,10 +3,9 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from ...core.database import get_db_financiero
-from ...schemas.User import Usuario, UsuarioCreate, UsuarioUpdate, Rol, RolCreate, RolUpdate
+from ...schemas.user import Usuario, UsuarioCreate, UsuarioUpdate, Rol, RolCreate, RolUpdate
 from ...services.user import UserService
 from ...api.deps import get_current_user
-# ✅ CORRECCIÓN: usar user en minúscula
 from ...models.user import Usuario as UsuarioModel
 
 router = APIRouter()

@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text, and_
 # ✅ CORRECCIÓN: usar user en minúscula
 from ..models.user import Usuario, Rol
-from ..schemas.User import UsuarioCreate, UsuarioUpdate, RolCreate, RolUpdate
+from ..schemas.user import UsuarioCreate, UsuarioUpdate, RolCreate, RolUpdate
 from ..core.security import get_password_hash
 from fastapi import HTTPException, status
 

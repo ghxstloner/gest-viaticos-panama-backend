@@ -12,7 +12,13 @@ from ...schemas.mission import (
     SubsanacionRequest, SubsanacionResponse, GestionCobroCreate,
     AttachmentUpload, WorkflowState, Subsanacion
 )
-from ...models.mission import Mision
+from ...schemas.mission import (
+    MisionCreate, MisionUpdate, MisionApprovalRequest, 
+    MisionRejectionRequest, MisionListResponse, MisionDetail,
+    SubsanacionRequest, SubsanacionResponse, GestionCobroCreate,
+    AttachmentUpload, WorkflowState, Subsanacion, Mision as MisionResponse
+)
+from ...models.mission import Mision as MisionModel
 from ...services.mission import MissionService
 from ...api.deps import get_current_user
 from ...models.user import Usuario
@@ -179,7 +185,7 @@ async def get_mission(
     return mission_service.get_mission_detail(mission_id, current_user)
 
 
-@router.put("/{mission_id}", response_model=Mision)
+@router.put("/{mission_id}", response_model=MisionResponse)
 async def update_mission(
     mission_id: int,
     mission_data: MisionUpdate,
