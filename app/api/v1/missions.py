@@ -7,11 +7,12 @@ import uuid
 
 from ...core.database import get_db_financiero
 from ...schemas.mission import (
-    Mision, MisionCreate, MisionUpdate, MisionApprovalRequest, 
+    MisionCreate, MisionUpdate, MisionApprovalRequest, 
     MisionRejectionRequest, MisionListResponse, MisionDetail,
     SubsanacionRequest, SubsanacionResponse, GestionCobroCreate,
     AttachmentUpload, WorkflowState, Subsanacion
 )
+from ...models.mission import Mision
 from ...services.mission import MissionService
 from ...api.deps import get_current_user
 from ...models.user import Usuario
@@ -28,7 +29,7 @@ MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
-@router.post("/", response_model=Mision)
+@router.post("/")
 async def create_mission(
     mission_data: MisionCreate,
     background_tasks: BackgroundTasks,
@@ -36,34 +37,49 @@ async def create_mission(
     current_user: Usuario = Depends(get_current_user)
 ):
     """Crear nueva misión/solicitud"""
-    mission_service = MissionService(db)
-    
-    # Si no se especifica el beneficiario, usar el usuario actual
-    if not mission_data.beneficiario_personal_id:
-        if not current_user.personal_id_rrhh:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="El usuario no tiene un ID de personal asociado"
-            )
-        mission_data.beneficiario_personal_id = current_user.personal_id_rrhh
-    
-    mission = mission_service.create_mission(mission_data, current_user.id_usuario)
-    
-    # Programar notificación en segundo plano
-    background_tasks.add_task(
-        send_mission_notification, 
-        mission.id_mision, 
-        "created",
-        db
-    )
-    
-    return mission
+    try:
+        mission_service = MissionService(db)
+        
+        # Si no se especifica el beneficiario, usar el usuario actual
+        if not mission_data.beneficiario_personal_id:
+            if not current_user.personal_id_rrhh:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="El usuario no tiene un ID de personal asociado"
+                )
+            mission_data.beneficiario_personal_id = current_user.personal_id_rrhh
+        
+        mission = mission_service.create_mission(mission_data, current_user.id_usuario)
+        
+        # Programar notificación en segundo plano
+        background_tasks.add_task(
+            send_mission_notification, 
+            mission.id_mision, 
+            "created",
+            db
+        )
+        
+        return {
+            "success": True,
+            "message": "Solicitud creada exitosamente",
+            "data": {
+                "id_mision": mission.id_mision,
+                "numero_solicitud": f"SOL-{mission.id_mision:06d}",
+                "estado": mission.estado_flujo.nombre_estado,
+                "monto_total": float(mission.monto_total_calculado)
+            }
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
 
 
-@router.get("/", response_model=MisionListResponse)
+@router.get("/")
 async def get_missions(
-    skip: int = Query(0, ge=0),
-    limit: int = Query(100, ge=1, le=1000),
+    page: int = Query(1, ge=1),
+    size: int = Query(100, ge=1, le=1000),
     estado_id: Optional[int] = None,
     tipo_mision: Optional[TipoMision] = None,
     fecha_desde: Optional[date] = None,
@@ -73,16 +89,52 @@ async def get_missions(
     current_user: Usuario = Depends(get_current_user)
 ):
     """Obtener lista de misiones con filtros"""
-    mission_service = MissionService(db)
-    return mission_service.get_missions(
-        user=current_user,
-        skip=skip,
-        limit=limit,
-        estado_id=estado_id,
-        tipo_mision=tipo_mision,
-        fecha_desde=fecha_desde,
-        fecha_hasta=fecha_hasta
-    )
+    try:
+        mission_service = MissionService(db)
+        skip = (page - 1) * size
+        
+        result = mission_service.get_missions(
+            user=current_user,
+            skip=skip,
+            limit=size,
+            estado_id=estado_id,
+            tipo_mision=tipo_mision,
+            fecha_desde=fecha_desde,
+            fecha_hasta=fecha_hasta
+        )
+        
+        # Transformar misiones a formato de respuesta
+        missions_data = []
+        for mission in result["items"]:
+            missions_data.append({
+                "id_mision": mission.id_mision,
+                "numero_solicitud": f"SOL-{mission.id_mision:06d}",
+                "tipo_mision": mission.tipo_mision,
+                "destino_mision": mission.destino_mision,
+                "fecha_salida": mission.fecha_salida.isoformat(),
+                "fecha_retorno": mission.fecha_retorno.isoformat(),
+                "monto_total_calculado": float(mission.monto_total_calculado),
+                "estado_flujo": {
+                    "id_estado_flujo": mission.estado_flujo.id_estado_flujo,
+                    "nombre_estado": mission.estado_flujo.nombre_estado,
+                    "descripcion": mission.estado_flujo.descripcion
+                },
+                "created_at": mission.created_at.isoformat() if mission.created_at else None,
+                "requiere_refrendo_cgr": mission.requiere_refrendo_cgr
+            })
+        
+        return {
+            "items": missions_data,
+            "total": result["total"],
+            "page": result["page"],
+            "size": result["size"],
+            "pages": result["pages"]
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
 
 
 @router.get("/states", response_model=List[WorkflowState])
@@ -438,3 +490,288 @@ async def send_subsanation_notification(subsanation_id: int, action: str, db: Se
     """Enviar notificación sobre subsanación"""
     # TODO: Implementar envío real de notificaciones
     print(f"Notificación: Subsanación {subsanation_id} - Acción: {action}")
+
+
+# ======== ENDPOINTS ESPECÍFICOS PARA FLUJOS DE SIRCEL ========
+
+@router.post("/{mission_id}/proceso-tesoreria")
+async def process_tesoreria_action(
+    mission_id: int,
+    action: str = Query(..., description="APROBAR, RECHAZAR, DEVOLVER"),
+    comentarios: str = Query(None, description="Comentarios opcionales"),
+    db: Session = Depends(get_db_financiero),
+    current_user: Usuario = Depends(get_current_user)
+):
+    """Procesar acción de Tesorería en el flujo SIRCEL"""
+    if current_user.id_rol != 3:  # Analista Tesorería
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo el personal de Tesorería puede realizar esta acción"
+        )
+    
+    try:
+        mission_service = MissionService(db)
+        mission = mission_service.process_workflow_action(
+            mission_id=mission_id,
+            user=current_user,
+            action=action.upper(),
+            comentarios=comentarios
+        )
+        
+        return {
+            "success": True,
+            "message": f"Acción {action} procesada exitosamente",
+            "data": {
+                "nuevo_estado": mission.estado_flujo.nombre_estado,
+                "requiere_gestion_cobro": action.upper() == "APROBAR" and mission.tipo_mision == "VIATICOS"
+            }
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+
+
+@router.post("/{mission_id}/proceso-presupuesto")
+async def process_presupuesto_action(
+    mission_id: int,
+    action: str = Query(..., description="APROBAR, RECHAZAR, DEVOLVER"),
+    codigo_presupuestario: str = Query(None, description="Código presupuestario"),
+    comentarios: str = Query(None, description="Comentarios opcionales"),
+    db: Session = Depends(get_db_financiero),
+    current_user: Usuario = Depends(get_current_user)
+):
+    """Procesar acción de Presupuesto en el flujo SIRCEL"""
+    if current_user.id_rol != 5:  # Analista Presupuesto
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo el personal de Presupuesto puede realizar esta acción"
+        )
+    
+    try:
+        mission_service = MissionService(db)
+        mission = mission_service.process_workflow_action(
+            mission_id=mission_id,
+            user=current_user,
+            action=action.upper(),
+            comentarios=comentarios
+        )
+        
+        # Si aprueba, asignar código presupuestario
+        if action.upper() == "APROBAR" and codigo_presupuestario:
+            # Actualizar gestión de cobro con código presupuestario
+            gestion = db.query(GestionCobro).filter(
+                GestionCobro.id_mision == mission_id
+            ).first()
+            if gestion:
+                gestion.codigo_presupuestario = codigo_presupuestario
+                db.commit()
+        
+        return {
+            "success": True,
+            "message": f"Acción {action} procesada exitosamente por Presupuesto",
+            "data": {
+                "nuevo_estado": mission.estado_flujo.nombre_estado,
+                "codigo_presupuestario": codigo_presupuestario if action.upper() == "APROBAR" else None
+            }
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+
+
+@router.post("/{mission_id}/proceso-contabilidad")
+async def process_contabilidad_action(
+    mission_id: int,
+    action: str = Query(..., description="APROBAR, RECHAZAR, DEVOLVER"),
+    asiento_contable: str = Query(None, description="Número de asiento contable"),
+    comentarios: str = Query(None, description="Comentarios opcionales"),
+    db: Session = Depends(get_db_financiero),
+    current_user: Usuario = Depends(get_current_user)
+):
+    """Procesar acción de Contabilidad en el flujo SIRCEL"""
+    if current_user.id_rol != 6:  # Analista Contabilidad
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo el personal de Contabilidad puede realizar esta acción"
+        )
+    
+    try:
+        mission_service = MissionService(db)
+        mission = mission_service.process_workflow_action(
+            mission_id=mission_id,
+            user=current_user,
+            action=action.upper(),
+            comentarios=comentarios
+        )
+        
+        return {
+            "success": True,
+            "message": f"Acción {action} procesada exitosamente por Contabilidad",
+            "data": {
+                "nuevo_estado": mission.estado_flujo.nombre_estado,
+                "asiento_contable": asiento_contable if action.upper() == "APROBAR" else None
+            }
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+
+
+@router.post("/{mission_id}/proceso-director-finanzas")
+async def process_director_finanzas_action(
+    mission_id: int,
+    action: str = Query(..., description="APROBAR, RECHAZAR, DEVOLVER"),
+    comentarios: str = Query(None, description="Comentarios del director"),
+    db: Session = Depends(get_db_financiero),
+    current_user: Usuario = Depends(get_current_user)
+):
+    """Procesar acción del Director de Finanzas en el flujo SIRCEL"""
+    if current_user.id_rol != 7:  # Director Finanzas
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo el Director de Finanzas puede realizar esta acción"
+        )
+    
+    try:
+        mission_service = MissionService(db)
+        mission = mission_service.process_workflow_action(
+            mission_id=mission_id,
+            user=current_user,
+            action=action.upper(),
+            comentarios=comentarios
+        )
+        
+        return {
+            "success": True,
+            "message": f"Acción {action} procesada exitosamente por Director de Finanzas",
+            "data": {
+                "nuevo_estado": mission.estado_flujo.nombre_estado,
+                "requiere_refrendo_cgr": mission.requiere_refrendo_cgr,
+                "firma_director": action.upper() == "APROBAR"
+            }
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+
+
+@router.post("/{mission_id}/proceso-cgr")
+async def process_cgr_action(
+    mission_id: int,
+    action: str = Query(..., description="APROBAR, RECHAZAR, SUBSANAR"),
+    comentarios: str = Query(None, description="Comentarios del fiscalizador"),
+    db: Session = Depends(get_db_financiero),
+    current_user: Usuario = Depends(get_current_user)
+):
+    """Procesar acción del Fiscalizador CGR en el flujo SIRCEL"""
+    if current_user.id_rol != 8:  # Fiscalizador CGR
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo el Fiscalizador de CGR puede realizar esta acción"
+        )
+    
+    try:
+        mission_service = MissionService(db)
+        mission = mission_service.process_workflow_action(
+            mission_id=mission_id,
+            user=current_user,
+            action=action.upper(),
+            comentarios=comentarios
+        )
+        
+        return {
+            "success": True,
+            "message": f"Refrendo CGR: {action} procesado exitosamente",
+            "data": {
+                "nuevo_estado": mission.estado_flujo.nombre_estado,
+                "refrendo_cgr": action.upper() == "APROBAR",
+                "requiere_subsanacion": action.upper() == "SUBSANAR"
+            }
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+
+
+@router.post("/{mission_id}/proceso-pago")
+async def process_payment(
+    mission_id: int,
+    tipo_pago: str = Query(..., description="TRANSFERENCIA, EFECTIVO"),
+    numero_transferencia: str = Query(None, description="Número de transferencia"),
+    comentarios: str = Query(None, description="Comentarios del pago"),
+    db: Session = Depends(get_db_financiero),
+    current_user: Usuario = Depends(get_current_user)
+):
+    """Procesar pago final en el flujo SIRCEL"""
+    if current_user.id_rol not in [3, 4]:  # Tesorería o Custodio Caja
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo personal autorizado puede procesar pagos"
+        )
+    
+    try:
+        mission_service = MissionService(db)
+        mission = mission_service.process_workflow_action(
+            mission_id=mission_id,
+            user=current_user,
+            action="PAGAR",
+            comentarios=f"Pago {tipo_pago}: {comentarios or ''}"
+        )
+        
+        return {
+            "success": True,
+            "message": f"Pago procesado exitosamente: {tipo_pago}",
+            "data": {
+                "nuevo_estado": mission.estado_flujo.nombre_estado,
+                "tipo_pago": tipo_pago,
+                "numero_transferencia": numero_transferencia,
+                "monto_pagado": float(mission.monto_total_calculado)
+            }
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+
+
+@router.get("/mis-solicitudes")
+async def get_my_requests(
+    page: int = Query(1, ge=1),
+    size: int = Query(100, ge=1, le=1000),
+    db: Session = Depends(get_db_financiero),
+    current_user: Usuario = Depends(get_current_user)
+):
+    """Obtener solicitudes del usuario actual (para empleados)"""
+    if not current_user.personal_id_rrhh:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Usuario no tiene ID de personal asociado"
+        )
+    
+    try:
+        mission_service = MissionService(db)
+        skip = (page - 1) * size
+        
+        result = mission_service.get_missions(
+            user=current_user,
+            skip=skip,
+            limit=size
+        )
+        
+        return result
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )

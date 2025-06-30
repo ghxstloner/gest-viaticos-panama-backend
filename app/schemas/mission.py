@@ -1,29 +1,29 @@
-from pydantic import BaseModel, ConfigDict, Field
-from typing import Optional, List, Dict, Any
+from pydantic import BaseModel, ConfigDict, Field, validator
+from typing import Optional, List, Dict, Any, Union
 from datetime import datetime, date
 from decimal import Decimal
 from ..models.enums import TipoMision, TipoAccion, EstadoGestion, TipoDocumento, EstadoSubsanacion
 
 
 class EstadoFlujoBase(BaseModel):
+    id_estado_flujo: int
     nombre_estado: str
     descripcion: Optional[str] = None
-    es_estado_final: bool = False
-    requiere_comentario: bool = False
 
 
 class EstadoFlujo(EstadoFlujoBase):
     model_config = ConfigDict(from_attributes=True)
     
-    id_estado_flujo: int
+    es_estado_final: bool = False
+    requiere_comentario: bool = False
 
 
 class ItemViaticoBase(BaseModel):
     fecha: date
-    monto_desayuno: Optional[Decimal] = Decimal('0.00')
-    monto_almuerzo: Optional[Decimal] = Decimal('0.00')
-    monto_cena: Optional[Decimal] = Decimal('0.00')
-    monto_hospedaje: Optional[Decimal] = Decimal('0.00')
+    monto_desayuno: float = Field(ge=0, default=0.0)
+    monto_almuerzo: float = Field(ge=0, default=0.0)
+    monto_cena: float = Field(ge=0, default=0.0)
+    monto_hospedaje: float = Field(ge=0, default=0.0)
     observaciones: Optional[str] = None
 
 
@@ -40,10 +40,10 @@ class ItemViatico(ItemViaticoBase):
 
 class ItemTransporteBase(BaseModel):
     fecha: date
-    tipo: str
-    origen: str
-    destino: str
-    monto: Decimal
+    tipo: str = Field(..., description="Terrestre, Aéreo, Marítimo")
+    origen: str = Field(..., min_length=1)
+    destino: str = Field(..., min_length=1)
+    monto: float = Field(gt=0)
     observaciones: Optional[str] = None
 
 
@@ -67,19 +67,50 @@ class MisionBase(BaseModel):
     fecha_retorno: datetime
 
 
-class MisionCreate(MisionBase):
-    solicitud_caso_id_rrhh: int
-    items_viaticos: Optional[List[ItemViaticoCreate]] = []
-    items_transporte: Optional[List[ItemTransporteCreate]] = []
+class MisionCreate(BaseModel):
+    tipo_mision: TipoMision
+    beneficiario_personal_id: Optional[int] = None
+    objetivo_mision: str = Field(..., min_length=10, max_length=1000)
+    destino_mision: str = Field(..., min_length=1, max_length=255)
+    fecha_salida: datetime
+    fecha_retorno: datetime
+    observaciones_especiales: Optional[str] = None
+    
+    # Para viáticos
+    items_viaticos: Optional[List[ItemViaticoBase]] = []
+    items_transporte: Optional[List[ItemTransporteBase]] = []
+    
+    # Para caja menuda
+    monto_solicitado: Optional[float] = Field(None, gt=0)
+    concepto: Optional[str] = Field(None, min_length=5, max_length=255)
+    
+    @validator('fecha_retorno')
+    def validate_dates(cls, v, values):
+        if 'fecha_salida' in values and v < values['fecha_salida']:
+            raise ValueError('La fecha de retorno debe ser igual o posterior a la fecha de salida')
+        return v
+    
+    @validator('items_viaticos')
+    def validate_viaticos_items(cls, v, values):
+        if values.get('tipo_mision') == TipoMision.VIATICOS and not v:
+            raise ValueError('Los viáticos requieren al menos un día de gastos')
+        return v
+    
+    @validator('monto_solicitado')
+    def validate_monto_caja_menuda(cls, v, values):
+        if values.get('tipo_mision') == TipoMision.CAJA_MENUDA and not v:
+            raise ValueError('La caja menuda requiere especificar el monto solicitado')
+        return v
 
 
 class MisionUpdate(BaseModel):
-    objetivo_mision: Optional[str] = None
-    destino_mision: Optional[str] = None
+    objetivo_mision: Optional[str] = Field(None, min_length=10, max_length=1000)
+    destino_mision: Optional[str] = Field(None, min_length=1, max_length=255)
     fecha_salida: Optional[datetime] = None
     fecha_retorno: Optional[datetime] = None
-    monto_aprobado: Optional[Decimal] = None
     observaciones_especiales: Optional[str] = None
+    items_viaticos: Optional[List[ItemViaticoBase]] = None
+    items_transporte: Optional[List[ItemTransporteBase]] = None
 
 
 class Mision(MisionBase):
@@ -101,18 +132,21 @@ class Mision(MisionBase):
 
 
 class MisionApprovalRequest(BaseModel):
-    comentarios: Optional[str] = None
-    monto_aprobado: Optional[Decimal] = None
+    comentarios: Optional[str] = Field(None, max_length=500)
+    datos_adicionales: Optional[dict] = None
 
 
 class MisionRejectionRequest(BaseModel):
-    motivo: str
+    motivo: str = Field(..., min_length=10, max_length=500)
+    comentarios: Optional[str] = Field(None, max_length=500)
 
 
 class WebhookMisionAprobada(BaseModel):
-    solicitud_caso_id: int
-    usuario_aprobador: Optional[str] = None
-    fecha_aprobacion: Optional[datetime] = None
+    id_mision: int
+    estado_nuevo: str
+    aprobado_por: str
+    fecha_aprobacion: datetime
+    comentarios: Optional[str] = None
 
 
 class HistorialFlujoBase(BaseModel):
