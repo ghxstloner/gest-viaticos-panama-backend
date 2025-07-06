@@ -46,3 +46,34 @@ class EstadoSubsanacion(str, Enum):
     PENDIENTE = "PENDIENTE"
     COMPLETADA = "COMPLETADA"
     VENCIDA = "VENCIDA"
+
+
+class TipoTransporte(str, Enum):
+    AEREO = "AÉREO"
+    ACUATICO = "ACUÁTICO"
+    MARITIMO = "MARÍTIMO"
+    TERRESTRE = "TERRESTRE"
+
+
+class CategoriaBeneficiario(str, Enum):
+    TITULAR = "TITULAR"
+    OTROS_SERVIDORES = "OTROS SERVIDORES PÚBLICOS"
+    OTRAS_PERSONAS = "OTRAS PERSONAS"
+
+
+class TipoViaje(str, Enum):
+    NACIONAL = "NACIONAL"
+    INTERNACIONAL = "INTERNACIONAL"
+
+
+class TipoFirma(str, Enum):
+    SOLICITANTE = "SOLICITANTE"
+    JEFE = "JEFE"
+    DIRECTOR = "DIRECTOR"
+    FISCAL = "FISCAL"
+
+
+class SmtpSecurity(str, Enum):
+    NONE = "none"
+    TLS = "tls"
+    SSL = "ssl"

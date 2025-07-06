@@ -10,6 +10,7 @@ from .employee_requests import router as employee_router
 from .configuration import router as configuration_router
 from .dashboard import router as dashboard_router
 from .reports import router as reports_router  # NUEVO
+from .admin import router as admin_router  # NUEVO
 
 api_router = APIRouter()
 
@@ -22,3 +23,4 @@ api_router.include_router(employee_router, prefix="/employee", tags=["Employee"]
 api_router.include_router(configuration_router, prefix="/configuration", tags=["Configuration"])
 api_router.include_router(dashboard_router, prefix="/dashboard", tags=["Dashboard"])
 api_router.include_router(reports_router, prefix="/reports", tags=["Reports"])  # NUEVO
+api_router.include_router(admin_router, prefix="/admin", tags=["Administration"])  # NUEVO

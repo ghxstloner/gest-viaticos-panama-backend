@@ -3,6 +3,7 @@
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, JSON
 from sqlalchemy.sql import func
 from .base import Base, TimestampMixin
+from .enums import TipoDato, SmtpSecurity
 
 class ConfiguracionGeneral(Base, TimestampMixin):
     __tablename__ = "configuraciones_general"
@@ -36,7 +37,7 @@ class ConfiguracionSistema(Base, TimestampMixin):
     id_configuracion = Column(Integer, primary_key=True, index=True)
     clave = Column(String(100), unique=True, nullable=False)
     valor = Column(Text, nullable=False)
-    tipo_dato = Column(String(20), default="STRING")
+    tipo_dato = Column(String(20), default=TipoDato.STRING)
     descripcion = Column(Text, nullable=True)
     es_modificable = Column(Boolean, default=True)
 

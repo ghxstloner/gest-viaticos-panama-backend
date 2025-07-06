@@ -6,7 +6,7 @@ from .base import Base, TimestampMixin
 
 # ✅ Solo importar para type checking, evita referencias circulares
 if TYPE_CHECKING:
-    from .mission import TransicionFlujo, HistorialFlujo, GestionCobro, Subsanacion, Adjunto
+    from .mission import TransicionFlujo, HistorialFlujo, GestionCobro, Subsanacion, Adjunto, FirmaElectronica
 
 
 class Rol(Base, TimestampMixin):
@@ -26,7 +26,7 @@ class Usuario(Base, TimestampMixin):
     __tablename__ = "usuarios"
 
     id_usuario: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    personal_id_rrhh: Mapped[int] = mapped_column(Integer, unique=True, nullable=False)
+    personal_id_rrhh: Mapped[Optional[int]] = mapped_column(Integer, unique=True, nullable=True)
     login_username: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     id_rol: Mapped[int] = mapped_column(Integer, ForeignKey("roles.id_rol"), nullable=False)
@@ -40,3 +40,4 @@ class Usuario(Base, TimestampMixin):
     subsanaciones_solicitadas: Mapped[List["Subsanacion"]] = relationship("Subsanacion", foreign_keys="[Subsanacion.id_usuario_solicita]", back_populates="usuario_solicita")
     subsanaciones_responsables: Mapped[List["Subsanacion"]] = relationship("Subsanacion", foreign_keys="[Subsanacion.id_usuario_responsable]", back_populates="usuario_responsable")
     adjuntos_subidos: Mapped[List["Adjunto"]] = relationship("Adjunto", back_populates="usuario_subio")
+    firmas_electronicas: Mapped[List["FirmaElectronica"]] = relationship("FirmaElectronica", back_populates="usuario")

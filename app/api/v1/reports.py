@@ -73,3 +73,13 @@ async def get_mission_audit_trail(
     """Obtener rastro de auditoría de una misión"""
     report_service = ReportService(db)
     return report_service.generate_audit_trail(mission_id)
+
+
+@router.get("/dashboard")
+async def get_dashboard_stats(
+    db: Session = Depends(get_db_financiero),
+    current_user: Usuario = Depends(get_current_user)
+):
+    """Obtener estadísticas del dashboard"""
+    report_service = ReportService(db)
+    return report_service.get_dashboard_stats(current_user)

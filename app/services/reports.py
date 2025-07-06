@@ -142,6 +142,70 @@ class ReportService:
         
         return trail
 
+    def get_dashboard_stats(self, user: Usuario) -> Dict[str, Any]:
+        """Obtener estadísticas del dashboard"""
+        # Obtener fechas para el mes actual
+        today = date.today()
+        start_of_month = today.replace(day=1)
+        
+        # Total de misiones según el rol del usuario
+        base_query = self._get_base_query(user)
+        
+        # Estadísticas generales
+        total_misiones = base_query.count()
+        
+        # Estadísticas por estado
+        estado_counts = self.db.query(
+            EstadoFlujo.nombre_estado,
+            func.count(Mision.id_mision).label('count')
+        ).join(
+            Mision, EstadoFlujo.id_estado_flujo == Mision.id_estado_flujo
+        ).filter(
+            self._apply_user_filter(user, Mision)
+        ).group_by(EstadoFlujo.nombre_estado).all()
+        
+        # Contar por categorías
+        pendientes_revision = 0
+        aprobadas_mes = 0
+        rechazadas_mes = 0
+        
+        for estado, count in estado_counts:
+            if estado in ['PENDIENTE_REVISION', 'PENDIENTE_JEFE', 'PENDIENTE_TESORERIA', 'PENDIENTE_PRESUPUESTO']:
+                pendientes_revision += count
+            elif estado in ['APROBADO', 'PAGADO']:
+                aprobadas_mes += count
+            elif estado in ['RECHAZADO', 'DEVUELTO']:
+                rechazadas_mes += count
+        
+        # Monto total del mes
+        monto_total_mes = self.db.query(
+            func.sum(Mision.monto_total_calculado)
+        ).filter(
+            and_(
+                Mision.created_at >= start_of_month,
+                self._apply_user_filter(user, Mision)
+            )
+        ).scalar() or Decimal('0.00')
+        
+        return {
+            "total_misiones": total_misiones,
+            "pendientes_revision": pendientes_revision,
+            "aprobadas_mes": aprobadas_mes,
+            "rechazadas_mes": rechazadas_mes,
+            "monto_total_mes": float(monto_total_mes)
+        }
+
+    def _apply_user_filter(self, user: Usuario, model_class):
+        """Aplicar filtros basados en el rol del usuario"""
+        if user.rol.nombre_rol == "Administrador Sistema":
+            return True  # Los admins ven todo
+        elif user.rol.nombre_rol == "Solicitante":
+            return model_class.beneficiario_personal_id == user.personal_id_rrhh
+        elif user.rol.nombre_rol in ["Jefe Inmediato", "Analista Tesorería", "Director Finanzas"]:
+            return True  # Los roles de aprobación ven todo
+        else:
+            return model_class.beneficiario_personal_id == user.personal_id_rrhh
+
     def _generate_excel_report(self, missions: List[Mision]) -> io.BytesIO:
         """Generar reporte Excel"""
         output = io.BytesIO()

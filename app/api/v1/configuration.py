@@ -2,13 +2,13 @@
 
 import os
 import shutil
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Query
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db_financiero
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_current_employee
 from app.models.user import Usuario
 from app.services.configuration import ConfigurationService
 from app.schemas.configuration import (
@@ -35,7 +35,122 @@ MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
 # Crear directorio si no existe
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# === CONFIGURACIÓN GENERAL ===
+# === ENDPOINTS PÚBLICOS (sin autenticación) ===
+
+@router.get("/public/general")
+async def get_configuracion_general_public(
+    db: Session = Depends(get_db_financiero)
+):
+    """Obtiene la configuración general básica (sin autenticación)"""
+    service = ConfigurationService(db)
+    config = service.get_configuracion_general()
+    
+    if not config:
+        # Retornar configuración por defecto si no existe
+        return {
+            "nombre_empresa": "Sistema de Gestión de Viáticos",
+            "moneda_default": "USD",
+            "idioma_default": "es",
+            "zona_horaria": "America/Panama"
+        }
+    
+    # Retornar solo información básica y pública
+    return {
+        "nombre_empresa": config.nombre_empresa,
+        "logo_empresa": config.logo_empresa,
+        "moneda_default": config.moneda_default,
+        "idioma_default": config.idioma_default,
+        "zona_horaria": config.zona_horaria
+    }
+
+@router.get("/general/public")
+async def get_configuracion_general_public_alt(
+    db: Session = Depends(get_db_financiero)
+):
+    """Obtiene la configuración general básica (sin autenticación) - endpoint alternativo"""
+    service = ConfigurationService(db)
+    config = service.get_configuracion_general()
+    
+    if not config:
+        # Retornar configuración por defecto si no existe
+        return {
+            "nombre_empresa": "Sistema de Gestión de Viáticos",
+            "moneda_default": "USD",
+            "idioma_default": "es",
+            "zona_horaria": "America/Panama"
+        }
+    
+    # Retornar solo información básica y pública
+    return {
+        "nombre_empresa": config.nombre_empresa,
+        "logo_empresa": config.logo_empresa,
+        "moneda_default": config.moneda_default,
+        "idioma_default": config.idioma_default,
+        "zona_horaria": config.zona_horaria
+    }
+
+@router.get("/public/sistema/basic")
+async def get_configuraciones_sistema_basic(
+    db: Session = Depends(get_db_financiero)
+):
+    """Obtiene configuraciones básicas del sistema (sin autenticación)"""
+    service = ConfigurationService(db)
+    service.ensure_default_configurations()
+    
+    # Solo retornar configuraciones básicas necesarias para empleados
+    all_configs = service.get_configuraciones_as_dict()
+    
+    basic_configs = {
+        "LIMITE_EFECTIVO_VIATICOS": all_configs.get("LIMITE_EFECTIVO_VIATICOS", 200.0),
+        "DIAS_LIMITE_PRESENTACION": all_configs.get("DIAS_LIMITE_PRESENTACION", 10),
+        "MONTO_REFRENDO_CGR": all_configs.get("MONTO_REFRENDO_CGR", 1000.0)
+    }
+    
+    return basic_configs
+
+# === ENDPOINTS PARA EMPLEADOS ===
+
+@router.get("/employee/general")
+async def get_configuracion_general_employee(
+    db: Session = Depends(get_db_financiero),
+    current_employee: dict = Depends(get_current_employee)
+):
+    """Obtiene la configuración general para empleados autenticados"""
+    service = ConfigurationService(db)
+    config = service.get_configuracion_general()
+    
+    if not config:
+        return {
+            "nombre_empresa": "Sistema de Gestión de Viáticos",
+            "moneda_default": "USD",
+            "idioma_default": "es",
+            "zona_horaria": "America/Panama"
+        }
+    
+    # Retornar información más completa pero sin datos sensibles
+    return {
+        "nombre_empresa": config.nombre_empresa,
+        "ruc": config.ruc,
+        "direccion": config.direccion,
+        "telefono": config.telefono,
+        "email_empresa": config.email_empresa,
+        "logo_empresa": config.logo_empresa,
+        "moneda_default": config.moneda_default,
+        "idioma_default": config.idioma_default,
+        "zona_horaria": config.zona_horaria
+    }
+
+@router.get("/employee/sistema/dict")
+async def get_configuraciones_sistema_employee(
+    db: Session = Depends(get_db_financiero),
+    current_employee: dict = Depends(get_current_employee)
+):
+    """Obtiene configuraciones del sistema para empleados"""
+    service = ConfigurationService(db)
+    service.ensure_default_configurations()
+    return service.get_configuraciones_as_dict()
+
+# === CONFIGURACIÓN GENERAL (ADMIN) ===
 
 @router.get("/general", response_model=ConfiguracionGeneral)
 async def get_configuracion_general(
@@ -143,6 +258,29 @@ async def get_logo(
     db: Session = Depends(get_db_financiero)
 ):
     """Obtiene el logo de la empresa"""
+    config_service = ConfigurationService(db)
+    config = config_service.get_configuracion_general()
+    
+    if not config or not config.logo_empresa:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No hay logo configurado"
+        )
+    
+    file_path = f".{config.logo_empresa}"
+    if not os.path.exists(file_path):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Archivo de logo no encontrado"
+        )
+    
+    return FileResponse(file_path)
+
+@router.get("/general/logo/public")
+async def get_logo_public(
+    db: Session = Depends(get_db_financiero)
+):
+    """Obtiene el logo de la empresa (endpoint público)"""
     config_service = ConfigurationService(db)
     config = config_service.get_configuracion_general()
     
