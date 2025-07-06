@@ -5,13 +5,13 @@ from sqlalchemy.orm import Session
 from typing import List, Dict, Any
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from sqlalchemy import and_, func, extract, text
 
 from app.core.database import get_db_rrhh, get_db_financiero
 from app.services.employee_request_service import EmployeeRequestService
 from app.api.deps import get_current_employee
 from app.models.mission import Mision, EstadoFlujo
 from app.models.user import Usuario
-from sqlalchemy import and_, func, extract
 
 router = APIRouter()
 
@@ -38,7 +38,8 @@ def get_my_requests(
 @router.get("/dashboard", response_model=Dict[str, Any])
 def get_employee_dashboard(
     current_employee: dict = Depends(get_current_employee),
-    db_financiero: Session = Depends(get_db_financiero)
+    db_financiero: Session = Depends(get_db_financiero),
+    db_rrhh: Session = Depends(get_db_rrhh)
 ):
     """
     Dashboard específico para empleados con sus estadísticas personales
@@ -51,14 +52,29 @@ def get_employee_dashboard(
             detail="No se pudo identificar la cédula del empleado desde el token."
         )
     
+    # Obtener personal_id desde RRHH usando el esquema completo
+    result = db_rrhh.execute(text("""
+        SELECT personal_id FROM aitsa_rrhh.nompersonal 
+        WHERE cedula = :cedula AND estado != 'De Baja'
+    """), {"cedula": cedula})
+    
+    employee_record = result.fetchone()
+    if not employee_record:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Empleado no encontrado en RRHH"
+        )
+    
+    personal_id = employee_record.personal_id
+    
     # Obtener fechas para el mes actual
     today = date.today()
     start_of_month = today.replace(day=1)
     start_of_year = today.replace(month=1, day=1)
     
-    # Filtrar misiones por cédula del empleado
+    # Filtrar misiones por personal_id del empleado
     base_query = db_financiero.query(Mision).filter(
-        Mision.cedula_beneficiario == cedula
+        Mision.beneficiario_personal_id == personal_id
     )
     
     # Estadísticas generales
@@ -81,7 +97,7 @@ def get_employee_dashboard(
     ).join(
         Mision, EstadoFlujo.id_estado_flujo == Mision.id_estado_flujo
     ).filter(
-        Mision.cedula_beneficiario == cedula
+        Mision.beneficiario_personal_id == personal_id
     ).group_by(EstadoFlujo.nombre_estado).all()
     
     # Organizar estadísticas por categorías
@@ -107,7 +123,7 @@ def get_employee_dashboard(
     monto_total_solicitado = db_financiero.query(
         func.sum(Mision.monto_total_calculado)
     ).filter(
-        Mision.cedula_beneficiario == cedula
+        Mision.beneficiario_personal_id == personal_id
     ).scalar() or Decimal('0.00')
     
     # Monto total aprobado
@@ -115,7 +131,7 @@ def get_employee_dashboard(
         func.sum(Mision.monto_aprobado)
     ).filter(
         and_(
-            Mision.cedula_beneficiario == cedula,
+            Mision.beneficiario_personal_id == personal_id,
             Mision.monto_aprobado.isnot(None)
         )
     ).scalar() or Decimal('0.00')
@@ -125,7 +141,7 @@ def get_employee_dashboard(
         func.sum(Mision.monto_total_calculado)
     ).filter(
         and_(
-            Mision.cedula_beneficiario == cedula,
+            Mision.beneficiario_personal_id == personal_id,
             Mision.created_at >= start_of_month
         )
     ).scalar() or Decimal('0.00')
@@ -135,16 +151,17 @@ def get_employee_dashboard(
         Mision.tipo_mision,
         func.count(Mision.id_mision).label('count')
     ).filter(
-        Mision.cedula_beneficiario == cedula
+        Mision.beneficiario_personal_id == personal_id
     ).group_by(Mision.tipo_mision).all()
     
     misiones_por_tipo = {}
     for tipo, count in tipo_counts:
-        misiones_por_tipo[tipo.value] = count
+        # tipo ya es un string, no necesita .value
+        misiones_por_tipo[str(tipo)] = count
     
     # Misiones recientes (últimas 5)
     misiones_recientes = db_financiero.query(Mision).filter(
-        Mision.cedula_beneficiario == cedula
+        Mision.beneficiario_personal_id == personal_id
     ).order_by(Mision.created_at.desc()).limit(5).all()
     
     # Formatear misiones recientes
@@ -152,10 +169,10 @@ def get_employee_dashboard(
     for mision in misiones_recientes:
         recientes_data.append({
             "id_mision": mision.id_mision,
-            "tipo_mision": mision.tipo_mision.value,
+            "tipo_mision": str(mision.tipo_mision),
             "destino_mision": mision.destino_mision,
             "fecha_salida": mision.fecha_salida.isoformat() if mision.fecha_salida else None,
-            "fecha_regreso": mision.fecha_regreso.isoformat() if mision.fecha_regreso else None,
+            "fecha_regreso": mision.fecha_retorno.isoformat() if mision.fecha_retorno else None,
             "monto_total_calculado": float(mision.monto_total_calculado or 0),
             "monto_aprobado": float(mision.monto_aprobado or 0),
             "estado_flujo": {
@@ -168,8 +185,7 @@ def get_employee_dashboard(
     return {
         "empleado": {
             "cedula": cedula,
-            "nombre": current_employee.get("nombre", ""),
-            "apellido": current_employee.get("apellido", "")
+            "nombre": current_employee.get("apenom", "")
         },
         "resumen_general": {
             "total_misiones": total_misiones,

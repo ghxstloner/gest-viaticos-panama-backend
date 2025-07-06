@@ -8,7 +8,6 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from app.core.config import settings
-# ✅ CORRECCIÓN: usar user en minúscula
 from app.models.user import Usuario
 from app.core.database import get_db_financiero, get_db_rrhh
 
@@ -75,7 +74,8 @@ def get_current_employee(
     except (JWTError, IndexError):
         raise credentials_exception
     
-    query = text("SELECT personal_id, cedula, apenom, email FROM nompersonal WHERE cedula = :cedula AND estado != 'De Baja'")
+    # Usar esquema completo para consulta cross-database
+    query = text("SELECT personal_id, cedula, apenom, email FROM aitsa_rrhh.nompersonal WHERE cedula = :cedula AND estado != 'De Baja'")
     result = db.execute(query, {"cedula": cedula})
     employee = result.fetchone()
 

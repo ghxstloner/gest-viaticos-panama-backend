@@ -11,7 +11,7 @@ from fastapi import (
     APIRouter, Depends, HTTPException, status, Query,
     UploadFile, File, BackgroundTasks, Body
 )
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import text
 
 from ...core.database import get_db_financiero, get_db_rrhh
@@ -31,7 +31,6 @@ from ...schemas.mission import (
 
 
 router = APIRouter(
-    prefix="/missions",
     tags=["Missions"],
 )
 
@@ -158,9 +157,9 @@ async def get_employee_missions(
                 detail="No se pudo identificar la cédula del empleado"
             )
         
-        # Buscar personal_id en RRHH
+        # Buscar personal_id en RRHH usando esquema completo
         result = db_rrhh.execute(text("""
-            SELECT personal_id FROM nompersonal 
+            SELECT personal_id FROM aitsa_rrhh.nompersonal 
             WHERE cedula = :cedula AND estado != 'De Baja'
         """), {"cedula": cedula})
         
@@ -173,8 +172,10 @@ async def get_employee_missions(
         
         personal_id = employee_record.personal_id
         
-        # Construir query para misiones
-        query = db_financiero.query(MisionModel).filter(
+        # Construir query con relaciones cargadas
+        query = db_financiero.query(MisionModel).options(
+            joinedload(MisionModel.estado_flujo)
+        ).filter(
             MisionModel.beneficiario_personal_id == personal_id
         )
         
@@ -193,17 +194,34 @@ async def get_employee_missions(
         total = query.count()
         items = query.order_by(MisionModel.created_at.desc()).offset(skip).limit(size).all()
         
-        # Construir respuesta
+        # Construir respuesta manualmente
         response_items = []
         for mission in items:
-            # Cargar estado de flujo manualmente si no está cargado
+            # Asegurar que estado_flujo está cargado
             if not mission.estado_flujo:
                 estado = db_financiero.query(EstadoFlujo).filter(
                     EstadoFlujo.id_estado_flujo == mission.id_estado_flujo
                 ).first()
                 mission.estado_flujo = estado
             
-            response_items.append(MisionListResponseItem.model_validate(mission))
+            # Crear objeto manualmente para evitar errores de validación
+            mission_item = {
+                "id_mision": mission.id_mision,
+                "numero_solicitud": mission.numero_solicitud,
+                "tipo_mision": mission.tipo_mision,
+                "objetivo_mision": mission.objetivo_mision,
+                "destino_mision": mission.destino_mision,
+                "fecha_salida": mission.fecha_salida,
+                "monto_total_calculado": mission.monto_total_calculado,
+                "estado_flujo": {
+                    "id_estado_flujo": mission.estado_flujo.id_estado_flujo,
+                    "nombre_estado": mission.estado_flujo.nombre_estado,
+                    "descripcion": mission.estado_flujo.descripcion
+                } if mission.estado_flujo else None,
+                "created_at": mission.created_at
+            }
+            
+            response_items.append(MisionListResponseItem.model_validate(mission_item))
         
         return MisionListResponse(
             items=response_items,
@@ -213,8 +231,12 @@ async def get_employee_missions(
             pages=(total + size - 1) // size if size > 0 else 0
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Error obteniendo misiones del empleado: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error interno del servidor"
@@ -235,7 +257,7 @@ async def get_employee_mission_detail(
         # Verificar que la misión pertenece al empleado
         cedula = current_employee.get("cedula")
         result = db_rrhh.execute(text("""
-            SELECT personal_id FROM nompersonal 
+            SELECT personal_id FROM aitsa_rrhh.nompersonal 
             WHERE cedula = :cedula AND estado != 'De Baja'
         """), {"cedula": cedula})
         
