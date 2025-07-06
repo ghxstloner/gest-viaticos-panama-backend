@@ -1,7 +1,7 @@
-from typing import List, Optional
+from typing import List, Optional, Union
 from sqlalchemy.orm import Session
 from sqlalchemy import text, and_
-from ..models.user import Usuario, Rol, Permiso
+from ..models.user import Usuario, Rol, Permiso, RolPermiso
 from ..schemas.user import UsuarioCreate, UsuarioUpdate, RolCreate, RolUpdate
 from ..core.security import get_password_hash
 from fastapi import HTTPException, status
@@ -242,6 +242,16 @@ class UserService:
     def get_permisos(self) -> List[Permiso]:
         """Get all permissions"""
         return self.db.query(Permiso).order_by(Permiso.modulo, Permiso.accion).all()
+
+    # ✅ NUEVO MÉTODO: Obtener permisos específicos de un rol
+    def get_user_permissions_by_role(self, role_id: int) -> List[Permiso]:
+        """Get permissions for a specific role"""
+        return (
+            self.db.query(Permiso)
+            .join(RolPermiso, Permiso.id_permiso == RolPermiso.id_permiso)
+            .filter(RolPermiso.id_rol == role_id)
+            .all()
+        )
 
     def assign_permission_to_role(self, role_id: int, permission_id: int) -> bool:
         """Assign permission to role"""

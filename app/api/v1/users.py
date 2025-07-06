@@ -1,11 +1,11 @@
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Union
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db_financiero
 from app.schemas.user import Usuario, UsuarioCreate, UsuarioUpdate, Rol, RolCreate, RolUpdate, Permiso
 from app.services.user import UserService
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_current_user_universal
 from app.models.user import Usuario as UsuarioModel
 
 router = APIRouter()
@@ -88,7 +88,7 @@ async def delete_user(
 @router.get("/roles/", response_model=List[Rol])
 async def get_roles(
     db: Session = Depends(get_db_financiero),
-    current_user: UsuarioModel = Depends(get_current_user)
+    current_user: Union[UsuarioModel, dict] = Depends(get_current_user_universal)
 ):
     """Get all roles with their permissions"""
     user_service = UserService(db)
@@ -156,25 +156,26 @@ async def get_permisos(
 @router.get("/permisos/estructura")
 async def get_permisos_estructura(
     db: Session = Depends(get_db_financiero),
-    current_user: UsuarioModel = Depends(get_current_user)
+    current_user: Union[UsuarioModel, dict] = Depends(get_current_user_universal)
 ):
-    """Get permissions organized by module and action"""
+    """Get user permissions organized by module and action"""
     user_service = UserService(db)
-    permisos = user_service.get_permisos()
     
+    # ✅ Obtener el ID del rol del usuario
+    if isinstance(current_user, dict):  # Es empleado
+        user_role_id = 1  # Los empleados siempre tienen rol 1 (Solicitante)
+    else:  # Es usuario financiero
+        user_role_id = current_user.id_rol
+    
+    # ✅ Obtener los permisos específicos del usuario
+    permisos_usuario = user_service.get_user_permissions_by_role(user_role_id)
+    
+    # ✅ Organizar en estructura dinámica para el frontend
     estructura = {}
-    for permiso in permisos:
+    for permiso in permisos_usuario:
         if permiso.modulo not in estructura:
-            estructura[permiso.modulo] = {
-                'nombre': permiso.modulo.title(),
-                'acciones': []
-            }
-        estructura[permiso.modulo]['acciones'].append({
-            'codigo': permiso.codigo,
-            'accion': permiso.accion,
-            'nombre': permiso.nombre,
-            'descripcion': permiso.descripcion
-        })
+            estructura[permiso.modulo] = {}
+        estructura[permiso.modulo][permiso.accion] = True
     
     return estructura
 
