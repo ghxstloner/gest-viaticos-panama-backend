@@ -1,8 +1,7 @@
 from typing import List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import text, and_
-# ✅ CORRECCIÓN: usar user en minúscula
-from ..models.user import Usuario, Rol
+from ..models.user import Usuario, Rol, Permiso
 from ..schemas.user import UsuarioCreate, UsuarioUpdate, RolCreate, RolUpdate
 from ..core.security import get_password_hash
 from fastapi import HTTPException, status
@@ -177,8 +176,7 @@ class UserService:
 
         db_role = Rol(
             nombre_rol=role_data.nombre_rol,
-            descripcion=role_data.descripcion,
-            permisos_json=role_data.permisos_json
+            descripcion=role_data.descripcion
         )
 
         self.db.add(db_role)
@@ -240,6 +238,55 @@ class UserService:
         self.db.commit()
         return True
 
+    # === GESTIÓN DE PERMISOS ===
+    def get_permisos(self) -> List[Permiso]:
+        """Get all permissions"""
+        return self.db.query(Permiso).order_by(Permiso.modulo, Permiso.accion).all()
+
+    def assign_permission_to_role(self, role_id: int, permission_id: int) -> bool:
+        """Assign permission to role"""
+        role = self.get_role(role_id)
+        if not role:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Role not found"
+            )
+
+        permission = self.db.query(Permiso).filter(Permiso.id_permiso == permission_id).first()
+        if not permission:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Permission not found"
+            )
+
+        if permission not in role.permisos:
+            role.permisos.append(permission)
+            self.db.commit()
+
+        return True
+
+    def remove_permission_from_role(self, role_id: int, permission_id: int) -> bool:
+        """Remove permission from role"""
+        role = self.get_role(role_id)
+        if not role:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Role not found"
+            )
+
+        permission = self.db.query(Permiso).filter(Permiso.id_permiso == permission_id).first()
+        if not permission:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Permission not found"
+            )
+
+        if permission in role.permisos:
+            role.permisos.remove(permission)
+            self.db.commit()
+
+        return True
+
     # === UTILIDADES ===
     def verify_personal_in_rrhh(self, personal_id: int) -> bool:
         """Verify if personal ID exists in RRHH system"""
@@ -260,4 +307,4 @@ class UserService:
         user = self.get_user(user_id)
         if not user or not user.rol:
             return {}
-        return user.rol.permisos_json or {}
+        return user.get_permissions()

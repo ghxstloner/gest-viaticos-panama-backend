@@ -5,82 +5,68 @@ This module defines business-specific exceptions that can be raised throughout t
 and handled by FastAPI's exception handlers to return appropriate HTTP responses.
 """
 
+from typing import Dict, Any, Optional
 from fastapi import HTTPException, status
-from typing import Optional, Dict, Any
 
 
-class BusinessException(Exception):
-    """
-    Base exception for business logic errors.
-    
-    This exception is raised when business rules are violated or 
-    invalid operations are attempted according to the SIRCEL workflow.
-    """
-    
-    def __init__(self, message: str, details: Optional[Dict[str, Any]] = None):
+class BaseAppException(Exception):
+    """Excepción base para todas las excepciones de la aplicación"""
+    def __init__(self, message: str, status_code: int = status.HTTP_500_INTERNAL_SERVER_ERROR):
         self.message = message
-        self.details = details or {}
+        self.status_code = status_code
         super().__init__(self.message)
 
 
-class WorkflowException(BusinessException):
-    """
-    Exception raised when workflow state transitions are invalid.
-    
-    Used specifically for SIRCEL workflow violations like:
-    - Invalid state transitions
-    - Unauthorized workflow actions
-    - Missing required approvals
-    """
-    pass
+class AuthenticationException(BaseAppException):
+    """Excepción para errores de autenticación"""
+    def __init__(self, message: str = "Error de autenticación"):
+        super().__init__(message, status_code=status.HTTP_401_UNAUTHORIZED)
 
 
-class ValidationException(BusinessException):
-    """
-    Exception raised when data validation fails.
-    
-    Used for business rule validations like:
-    - Invalid mission dates
-    - Amount limits exceeded
-    - Required field violations
-    """
-    pass
+class ValidationException(BaseAppException):
+    """Excepción para errores de validación"""
+    def __init__(self, message: str = "Error de validación"):
+        super().__init__(message, status_code=status.HTTP_422_UNPROCESSABLE_ENTITY)
 
 
-class PermissionException(BusinessException):
-    """
-    Exception raised when user lacks required permissions.
-    
-    Used for role-based access control violations like:
-    - Insufficient user role for action
-    - Unauthorized resource access
-    - Invalid operation for user type
-    """
-    pass
+class PermissionException(BaseAppException):
+    """Excepción para errores de permisos"""
+    def __init__(self, message: str = "No tiene permisos para realizar esta acción"):
+        super().__init__(message, status_code=status.HTTP_403_FORBIDDEN)
 
 
-class ConfigurationException(BusinessException):
-    """
-    Exception raised when system configuration is invalid or missing.
-    
-    Used for configuration-related errors like:
-    - Missing system parameters
-    - Invalid configuration values
-    - Required settings not found
-    """
-    pass
+class BusinessException(BaseAppException):
+    """Excepción para errores de lógica de negocio"""
+    def __init__(self, message: str = "Error en la lógica de negocio"):
+        super().__init__(message, status_code=status.HTTP_400_BAD_REQUEST)
 
 
 class MissionException(BusinessException):
-    """
-    Exception raised for mission-specific business rule violations.
-    
-    Used for mission-related errors like:
-    - Invalid mission type operations
-    - CGR refrendo requirements not met
-    - Mission amount calculations errors
-    """
+    """Excepción específica para errores relacionados con misiones"""
     pass
+
+
+class WorkflowException(BusinessException):
+    """Excepción específica para errores en el flujo de trabajo"""
+    pass
+
+
+class ResourceNotFoundException(BaseAppException):
+    """Excepción para recursos no encontrados"""
+    def __init__(self, message: str = "Recurso no encontrado"):
+        super().__init__(message, status_code=status.HTTP_404_NOT_FOUND)
+
+
+class DatabaseException(BaseAppException):
+    """Excepción para errores de base de datos"""
+    def __init__(self, message: str = "Error en la base de datos"):
+        super().__init__(message, status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ConfigurationException(BaseAppException):
+    """Excepción para errores de configuración"""
+    def __init__(self, message: str = "Error en la configuración"):
+        super().__init__(message, status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 # HTTP Exception Classes for API responses

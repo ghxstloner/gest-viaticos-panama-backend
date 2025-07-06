@@ -1,12 +1,12 @@
-from typing import List
+from typing import List, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from ...core.database import get_db_financiero
-from ...schemas.user import Usuario, UsuarioCreate, UsuarioUpdate, Rol, RolCreate, RolUpdate
-from ...services.user import UserService
-from ...api.deps import get_current_user
-from ...models.user import Usuario as UsuarioModel
+from app.core.database import get_db_financiero
+from app.schemas.user import Usuario, UsuarioCreate, UsuarioUpdate, Rol, RolCreate, RolUpdate, Permiso
+from app.services.user import UserService
+from app.api.deps import get_current_user
+from app.models.user import Usuario as UsuarioModel
 
 router = APIRouter()
 
@@ -19,10 +19,8 @@ async def create_user(
     current_user: UsuarioModel = Depends(get_current_user)
 ):
     """Create new user (Admin only)"""
-    # TODO: Add admin permission check
     user_service = UserService(db)
     return user_service.create_user(user_data)
-
 
 @router.get("/", response_model=List[Usuario])
 async def get_users(
@@ -35,7 +33,6 @@ async def get_users(
     """Get all users"""
     user_service = UserService(db)
     return user_service.get_users(skip=skip, limit=limit, include_inactive=include_inactive)
-
 
 @router.get("/{user_id}", response_model=Usuario)
 async def get_user(
@@ -53,7 +50,6 @@ async def get_user(
         )
     return user
 
-
 @router.put("/{user_id}", response_model=Usuario)
 async def update_user(
     user_id: int,
@@ -61,20 +57,17 @@ async def update_user(
     db: Session = Depends(get_db_financiero),
     current_user: UsuarioModel = Depends(get_current_user)
 ):
-    """Update user (Admin only)"""
-    # TODO: Add admin permission check
+    """Update user"""
     user_service = UserService(db)
     return user_service.update_user(user_id, user_data)
 
-
-@router.delete("/{user_id}")
+@router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_user(
     user_id: int,
     db: Session = Depends(get_db_financiero),
     current_user: UsuarioModel = Depends(get_current_user)
 ):
-    """Delete user (Admin only)"""
-    # TODO: Add admin permission check
+    """Delete user"""
     if user_id == current_user.id_usuario:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -82,9 +75,13 @@ async def delete_user(
         )
     
     user_service = UserService(db)
-    success = user_service.delete_user(user_id)
-    return {"message": "User deleted successfully"}
-
+    try:
+        user_service.delete_user(user_id)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e)
+        )
 
 # === ENDPOINTS DE ROLES ===
 
@@ -93,10 +90,9 @@ async def get_roles(
     db: Session = Depends(get_db_financiero),
     current_user: UsuarioModel = Depends(get_current_user)
 ):
-    """Get all roles"""
+    """Get all roles with their permissions"""
     user_service = UserService(db)
     return user_service.get_roles()
-
 
 @router.post("/roles/", response_model=Rol)
 async def create_role(
@@ -104,11 +100,9 @@ async def create_role(
     db: Session = Depends(get_db_financiero),
     current_user: UsuarioModel = Depends(get_current_user)
 ):
-    """Create new role (Admin only)"""
-    # TODO: Add admin permission check
+    """Create new role"""
     user_service = UserService(db)
     return user_service.create_role(role_data)
-
 
 @router.get("/roles/{role_id}", response_model=Rol)
 async def get_role(
@@ -126,7 +120,6 @@ async def get_role(
         )
     return role
 
-
 @router.put("/roles/{role_id}", response_model=Rol)
 async def update_role(
     role_id: int,
@@ -134,11 +127,9 @@ async def update_role(
     db: Session = Depends(get_db_financiero),
     current_user: UsuarioModel = Depends(get_current_user)
 ):
-    """Update role (Admin only)"""
-    # TODO: Add admin permission check
+    """Update role"""
     user_service = UserService(db)
     return user_service.update_role(role_id, role_data)
-
 
 @router.delete("/roles/{role_id}")
 async def delete_role(
@@ -146,12 +137,70 @@ async def delete_role(
     db: Session = Depends(get_db_financiero),
     current_user: UsuarioModel = Depends(get_current_user)
 ):
-    """Delete role (Admin only)"""
-    # TODO: Add admin permission check
+    """Delete role"""
     user_service = UserService(db)
     success = user_service.delete_role(role_id)
     return {"message": "Role deleted successfully"}
 
+# === ENDPOINTS DE PERMISOS ===
+
+@router.get("/permisos/", response_model=List[Permiso])
+async def get_permisos(
+    db: Session = Depends(get_db_financiero),
+    current_user: UsuarioModel = Depends(get_current_user)
+):
+    """Get all available permissions"""
+    user_service = UserService(db)
+    return user_service.get_permisos()
+
+@router.get("/permisos/estructura")
+async def get_permisos_estructura(
+    db: Session = Depends(get_db_financiero),
+    current_user: UsuarioModel = Depends(get_current_user)
+):
+    """Get permissions organized by module and action"""
+    user_service = UserService(db)
+    permisos = user_service.get_permisos()
+    
+    estructura = {}
+    for permiso in permisos:
+        if permiso.modulo not in estructura:
+            estructura[permiso.modulo] = {
+                'nombre': permiso.modulo.title(),
+                'acciones': []
+            }
+        estructura[permiso.modulo]['acciones'].append({
+            'codigo': permiso.codigo,
+            'accion': permiso.accion,
+            'nombre': permiso.nombre,
+            'descripcion': permiso.descripcion
+        })
+    
+    return estructura
+
+@router.post("/roles/{role_id}/permisos/{permission_id}")
+async def assign_permission_to_role(
+    role_id: int,
+    permission_id: int,
+    db: Session = Depends(get_db_financiero),
+    current_user: UsuarioModel = Depends(get_current_user)
+):
+    """Assign permission to role"""
+    user_service = UserService(db)
+    success = user_service.assign_permission_to_role(role_id, permission_id)
+    return {"message": "Permission assigned successfully"}
+
+@router.delete("/roles/{role_id}/permisos/{permission_id}")
+async def remove_permission_from_role(
+    role_id: int,
+    permission_id: int,
+    db: Session = Depends(get_db_financiero),
+    current_user: UsuarioModel = Depends(get_current_user)
+):
+    """Remove permission from role"""
+    user_service = UserService(db)
+    success = user_service.remove_permission_from_role(role_id, permission_id)
+    return {"message": "Permission removed successfully"}
 
 # === ENDPOINTS DE UTILIDADES ===
 
@@ -165,7 +214,6 @@ async def get_user_permissions(
     user_service = UserService(db)
     permissions = user_service.get_user_permissions(user_id)
     return {"permissions": permissions}
-
 
 @router.get("/verify-rrhh/{personal_id}")
 async def verify_personal_in_rrhh(

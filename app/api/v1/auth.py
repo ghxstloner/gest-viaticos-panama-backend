@@ -3,14 +3,46 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
+from typing import Optional
 
-from app.schemas.auth import LoginResponse
+from app.schemas.auth import LoginResponse, Token, UserResponse, UserRegister
 from app.services.auth import AuthService
-# ✅ Se importan los nuevos módulos necesarios
 from app.services.employee_auth import EmployeeAuthService
 from app.core.database import get_db_financiero, get_db_rrhh
+from app.core.exceptions import AuthenticationException
 
-router = APIRouter()
+router = APIRouter(tags=["Authentication"])
+
+@router.post("/token", response_model=Token)
+async def login_for_access_token(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db_financiero)
+):
+    """
+    Endpoint para autenticación de usuarios.
+    Retorna un token JWT y datos del usuario si las credenciales son válidas.
+    """
+    try:
+        auth_service = AuthService(db)
+        user = auth_service.authenticate_user(form_data.username, form_data.password)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Usuario o contraseña incorrecta",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        return auth_service.create_access_token(user)
+    except AuthenticationException as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(e),
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error interno del servidor"
+        )
 
 @router.post("/login/financiero", response_model=LoginResponse, tags=["Authentication"])
 def login_financiero(
@@ -35,7 +67,7 @@ def login_financiero(
 @router.post("/login/empleado", response_model=LoginResponse, tags=["Authentication"])
 def login_empleado(
     form_data: OAuth2PasswordRequestForm = Depends(),
-    db: Session = Depends(get_db_rrhh) # <<< Usa la conexión a RRHH
+    db: Session = Depends(get_db_rrhh)
 ):
     """
     Login para empleados/colaboradores.
@@ -52,3 +84,34 @@ def login_empleado(
             headers={"WWW-Authenticate": "Bearer"},
         )
     return result
+
+@router.post("/register/employee", response_model=UserResponse)
+async def register_employee(
+    user_data: UserRegister,
+    db: Session = Depends(get_db_financiero)
+):
+    """
+    Register a new employee user
+    """
+    auth_service = AuthService(db)
+    try:
+        user = auth_service.register_employee(
+            username=user_data.username,
+            password=user_data.password,
+            personal_id=user_data.personal_id
+        )
+        return UserResponse.from_orm(user)
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+@router.post("/logout")
+async def logout():
+    """
+    Logout endpoint - En JWT stateless, solo es informativo
+    """
+    return {"message": "Logout exitoso"}

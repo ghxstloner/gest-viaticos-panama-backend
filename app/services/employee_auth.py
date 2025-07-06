@@ -2,10 +2,11 @@
 
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from typing import Optional
+from typing import Optional, Dict, Any
+from datetime import timedelta
 
-# ✅ Se importa la nueva función de verificación MD5
 from app.core.security import verify_md5_password, create_access_token
+from app.core.config import settings
 from app.schemas.auth import LoginResponse
 
 class EmployeeAuthService:
@@ -16,7 +17,7 @@ class EmployeeAuthService:
         """Autentica a un empleado desde la tabla nompersonal de aitsa_rrhh."""
         try:
             query = text("""
-                SELECT personal_id, cedula, apenom, estado, usr_password
+                SELECT personal_id, cedula, apenom, estado, usr_password, email, telefonos
                 FROM nompersonal
                 WHERE cedula = :cedula
             """)
@@ -48,16 +49,86 @@ class EmployeeAuthService:
         if not employee:
             return None
 
-        # El subject del token identifica al usuario y su tipo
-        token_subject = f"employee:{employee['cedula']}"
-        access_token = create_access_token(subject=token_subject)
+        # Crear token con datos completos para empleado
+        token_data = {
+            "sub": f"employee:{employee['cedula']}",
+            "type": "employee",
+            "personal_id": employee["personal_id"],
+            "cedula": employee["cedula"],
+            "nombre": employee["apenom"]
+        }
+        
+        expires_delta = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = create_access_token(data=token_data, expires_delta=expires_delta)
+
+        # Estructura de respuesta para empleados con permisos básicos
+        user_data = {
+            "id": employee['personal_id'],
+            "id_usuario": employee['personal_id'],  # Para compatibilidad
+            "personal_id_rrhh": employee['personal_id'],
+            "cedula": employee['cedula'],
+            "nombre": employee['apenom'],
+            "email": employee.get('email'),
+            "telefonos": employee.get('telefonos'),
+            "username": employee['cedula'],  # Para compatibilidad con frontend
+            "login_username": employee['cedula'],
+            "nombre_completo": employee['apenom'],
+            "role": "Empleado",
+            "userType": "empleado",
+            "is_active": True,
+            "id_rol": 1,  # Rol de empleado
+            "rol": {
+                "id_rol": 1,
+                "nombre_rol": "Empleado",
+                "descripcion": "Empleado del sistema",
+                "es_rol_empleado": True,
+                "permisos_json": {
+                    "dashboard": {"ver": True},
+                    "misiones": {
+                        "ver": True,
+                        "crear": True,
+                        "ver_propias": True
+                    },
+                    "perfil": {
+                        "ver": True,
+                        "editar": True
+                    },
+                    "solicitudes": {
+                        "ver": True,
+                        "crear": True
+                    },
+                    "informes": {
+                        "ver": True,
+                        "crear": True,
+                        "presentar": True
+                    }
+                }
+            },
+            # Permisos directos para compatibilidad
+            "permissions": {
+                "dashboard": {"ver": True},
+                "misiones": {
+                    "ver": True,
+                    "crear": True,
+                    "ver_propias": True
+                },
+                "perfil": {
+                    "ver": True,
+                    "editar": True
+                },
+                "solicitudes": {
+                    "ver": True,
+                    "crear": True
+                },
+                "informes": {
+                    "ver": True,
+                    "crear": True,
+                    "presentar": True
+                }
+            }
+        }
 
         return LoginResponse(
             access_token=access_token,
-            user={
-                "id": employee['personal_id'],
-                "cedula": employee['cedula'],
-                "nombre": employee['apenom'],
-                "role": "Empleado"
-            }
+            user=user_data
         )

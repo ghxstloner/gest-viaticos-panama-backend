@@ -95,6 +95,7 @@ async def create_mission(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Ocurrió un error interno.")
 
 
+@router.get("", response_model=MisionListResponse, summary="Obtener lista de misiones")
 @router.get("/", response_model=MisionListResponse, summary="Obtener lista de misiones")
 async def get_missions(
     page: int = Query(1, ge=1),
@@ -119,7 +120,24 @@ async def get_missions(
         tipo_mision=tipo_mision, fecha_desde=fecha_desde, fecha_hasta=fecha_hasta
     )
     
-    response_items = [MisionListResponseItem.model_validate(m) for m in result["items"]]
+    response_items = []
+    for m in result["items"]:
+        mission_dict = {
+            "id_mision": m.id_mision,
+            "numero_solicitud": m.numero_solicitud,
+            "tipo_mision": m.tipo_mision,
+            "objetivo_mision": m.objetivo_mision,
+            "destino_mision": m.destino_mision,
+            "fecha_salida": m.fecha_salida,
+            "monto_total_calculado": m.monto_total_calculado,
+            "estado_flujo": {
+                "id_estado_flujo": m.estado_flujo.id_estado_flujo,
+                "nombre_estado": m.estado_flujo.nombre_estado,
+                "descripcion": m.estado_flujo.descripcion
+            } if m.estado_flujo else None,
+            "created_at": m.created_at
+        }
+        response_items.append(MisionListResponseItem.model_validate(mission_dict))
     
     return MisionListResponse(
         items=response_items,
