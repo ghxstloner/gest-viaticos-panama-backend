@@ -10,7 +10,7 @@ from app.core.database import get_db_rrhh, get_db_financiero
 from app.services.employee_request_service import EmployeeRequestService
 from app.api.deps import get_current_employee
 from app.models.mission import Mision, EstadoFlujo
-from app.models.User import Usuario
+from app.models.user import Usuario
 from sqlalchemy import and_, func, extract
 
 router = APIRouter()

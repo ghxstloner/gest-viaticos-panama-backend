@@ -12,11 +12,12 @@ from fastapi import (
     UploadFile, File, BackgroundTasks, Body
 )
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 
-from ...core.database import get_db_financiero
+from ...core.database import get_db_financiero, get_db_rrhh
 from ...core.exceptions import BusinessException, MissionException, WorkflowException, ValidationException
 from ...services.mission import MissionService
-from ...api.deps import get_current_user
+from ...api.deps import get_current_user, get_current_employee
 
 from ...models.mission import Mision as MisionModel, Adjunto, EstadoFlujo
 from ...models.user import Usuario
@@ -42,7 +43,7 @@ MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
-# --- Endpoints Principales de Misiones ---
+# --- Endpoints Principales de Misiones (Para usuarios financieros) ---
 
 @router.post("/", status_code=status.HTTP_201_CREATED, summary="Crear una nueva misión")
 async def create_mission(
@@ -129,6 +130,148 @@ async def get_missions(
         pages=result["pages"]
     )
 
+
+# --- NUEVOS ENDPOINTS PARA EMPLEADOS ---
+
+@router.get("/employee", response_model=MisionListResponse, summary="Obtener misiones del empleado")
+async def get_employee_missions(
+    page: int = Query(1, ge=1),
+    size: int = Query(100, ge=1, le=1000),
+    estado_id: Optional[int] = Query(None, description="Filtrar por ID de estado de flujo"),
+    tipo_mision: Optional[TipoMision] = Query(None, description="Filtrar por tipo de misión"),
+    fecha_desde: Optional[date] = Query(None),
+    fecha_hasta: Optional[date] = Query(None),
+    db_financiero: Session = Depends(get_db_financiero),
+    db_rrhh: Session = Depends(get_db_rrhh),
+    current_employee: dict = Depends(get_current_employee)
+):
+    """
+    Obtiene las misiones del empleado autenticado.
+    Busca por personal_id basado en la cédula del empleado.
+    """
+    try:
+        # Obtener personal_id desde la cédula del empleado
+        cedula = current_employee.get("cedula")
+        if not cedula:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No se pudo identificar la cédula del empleado"
+            )
+        
+        # Buscar personal_id en RRHH
+        result = db_rrhh.execute(text("""
+            SELECT personal_id FROM nompersonal 
+            WHERE cedula = :cedula AND estado != 'De Baja'
+        """), {"cedula": cedula})
+        
+        employee_record = result.fetchone()
+        if not employee_record:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Empleado no encontrado en RRHH"
+            )
+        
+        personal_id = employee_record.personal_id
+        
+        # Construir query para misiones
+        query = db_financiero.query(MisionModel).filter(
+            MisionModel.beneficiario_personal_id == personal_id
+        )
+        
+        # Aplicar filtros
+        if estado_id:
+            query = query.filter(MisionModel.id_estado_flujo == estado_id)
+        if tipo_mision:
+            query = query.filter(MisionModel.tipo_mision == tipo_mision)
+        if fecha_desde:
+            query = query.filter(MisionModel.fecha_salida >= fecha_desde)
+        if fecha_hasta:
+            query = query.filter(MisionModel.fecha_retorno <= fecha_hasta)
+        
+        # Paginación
+        skip = (page - 1) * size
+        total = query.count()
+        items = query.order_by(MisionModel.created_at.desc()).offset(skip).limit(size).all()
+        
+        # Construir respuesta
+        response_items = []
+        for mission in items:
+            # Cargar estado de flujo manualmente si no está cargado
+            if not mission.estado_flujo:
+                estado = db_financiero.query(EstadoFlujo).filter(
+                    EstadoFlujo.id_estado_flujo == mission.id_estado_flujo
+                ).first()
+                mission.estado_flujo = estado
+            
+            response_items.append(MisionListResponseItem.model_validate(mission))
+        
+        return MisionListResponse(
+            items=response_items,
+            total=total,
+            page=page,
+            size=size,
+            pages=(total + size - 1) // size if size > 0 else 0
+        )
+        
+    except Exception as e:
+        print(f"Error obteniendo misiones del empleado: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error interno del servidor"
+        )
+
+
+@router.get("/employee/{mission_id}", response_model=MisionDetail, summary="Obtener detalle de misión del empleado")
+async def get_employee_mission_detail(
+    mission_id: int,
+    db_financiero: Session = Depends(get_db_financiero),
+    db_rrhh: Session = Depends(get_db_rrhh),
+    current_employee: dict = Depends(get_current_employee)
+):
+    """
+    Obtiene el detalle de una misión específica del empleado autenticado.
+    """
+    try:
+        # Verificar que la misión pertenece al empleado
+        cedula = current_employee.get("cedula")
+        result = db_rrhh.execute(text("""
+            SELECT personal_id FROM nompersonal 
+            WHERE cedula = :cedula AND estado != 'De Baja'
+        """), {"cedula": cedula})
+        
+        employee_record = result.fetchone()
+        if not employee_record:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Empleado no encontrado")
+        
+        personal_id = employee_record.personal_id
+        
+        # Buscar la misión
+        mission = db_financiero.query(MisionModel).filter(
+            MisionModel.id_mision == mission_id,
+            MisionModel.beneficiario_personal_id == personal_id
+        ).first()
+        
+        if not mission:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Misión no encontrada")
+        
+        # Construir respuesta básica para empleados
+        return {
+            "mission": mission,
+            "beneficiary": current_employee,
+            "preparer": None,
+            "available_actions": [],  # Los empleados no pueden hacer acciones de workflow
+            "can_edit": False,
+            "can_delete": False
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error obteniendo detalle de misión del empleado: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error interno")
+
+
+# --- Resto de endpoints originales ---
 
 @router.get("/{mission_id}", response_model=MisionDetail, summary="Obtener detalle de una misión")
 async def get_mission(
