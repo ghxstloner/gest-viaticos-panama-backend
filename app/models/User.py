@@ -1,16 +1,17 @@
+# app/models/user.py
+
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text, Table
 from sqlalchemy.orm import relationship, Mapped, mapped_column
-from sqlalchemy.sql import func
 from typing import List, Optional, TYPE_CHECKING
 from .base import Base, TimestampMixin
 from datetime import datetime
 
 # ✅ Solo importar para type checking, evita referencias circulares
 if TYPE_CHECKING:
-    from .mission import TransicionFlujo, HistorialFlujo, GestionCobro, Subsanacion, Adjunto, FirmaElectronica
+    from .mission import TransicionFlujo, HistorialFlujo, GestionCobro, Subsanacion, Adjunto, FirmaElectronica, Mision
 
 # Definición de la tabla de asociación
-rol_permiso = Table(
+RolPermiso = Table(
     'rol_permiso',
     Base.metadata,
     Column('id_rol', Integer, ForeignKey('roles.id_rol'), primary_key=True),
@@ -30,7 +31,7 @@ class Permiso(Base):
     accion = Column(String(50), nullable=False)
     es_permiso_empleado = Column(Boolean, default=False)
     
-    roles = relationship("Rol", secondary=rol_permiso, back_populates="permisos")
+    roles = relationship("Rol", secondary=RolPermiso, back_populates="permisos")
 
 class Rol(Base, TimestampMixin):
     __tablename__ = "roles"
@@ -39,10 +40,9 @@ class Rol(Base, TimestampMixin):
     id_rol: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     nombre_rol: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     descripcion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    # ❌ REMOVIDO: esta_activo porque NO existe en tu tabla real
 
     usuarios: Mapped[List["Usuario"]] = relationship("Usuario", back_populates="rol")
-    permisos: Mapped[List["Permiso"]] = relationship("Permiso", secondary=rol_permiso, back_populates="roles")
+    permisos: Mapped[List["Permiso"]] = relationship("Permiso", secondary=RolPermiso, back_populates="roles")
     transiciones_flujo: Mapped[List["TransicionFlujo"]] = relationship("TransicionFlujo", back_populates="rol_autorizado")
 
     def has_permission(self, permission_code: str) -> bool:
@@ -75,27 +75,28 @@ class Usuario(Base, TimestampMixin):
     ultimo_acceso: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     rol: Mapped["Rol"] = relationship("Rol", back_populates="usuarios")
+    
+    # Relaciones para otras partes de la aplicación
     historial_flujo: Mapped[List["HistorialFlujo"]] = relationship("HistorialFlujo", back_populates="usuario_accion")
     gestiones_cobro: Mapped[List["GestionCobro"]] = relationship("GestionCobro", back_populates="usuario_genero")
     subsanaciones_solicitadas: Mapped[List["Subsanacion"]] = relationship("Subsanacion", foreign_keys="[Subsanacion.id_usuario_solicita]", back_populates="usuario_solicita")
     subsanaciones_responsables: Mapped[List["Subsanacion"]] = relationship("Subsanacion", foreign_keys="[Subsanacion.id_usuario_responsable]", back_populates="usuario_responsable")
     adjuntos_subidos: Mapped[List["Adjunto"]] = relationship("Adjunto", back_populates="usuario_subio")
     firmas_electronicas: Mapped[List["FirmaElectronica"]] = relationship("FirmaElectronica", back_populates="usuario")
+    misiones_preparadas: Mapped[List["Mision"]] = relationship("Mision", back_populates="usuario_prepara")
 
     def get_permissions(self):
         """Obtener permisos del usuario según su rol - DINÁMICO para todos"""
         if not self.rol:
             return {}
 
-        # TODOS los roles (incluyendo empleados) usan permisos de la BD
-        permisos_lista = []
-        for permiso in self.rol.permisos:
-            permisos_lista.append(permiso.codigo)
+        permisos_lista = [p.codigo for p in self.rol.permisos]
         
+        # --- CORRECCIÓN APLICADA AQUÍ ---
+        # Se eliminó la función lambda que causaba el error de serialización.
+        # Este diccionario es seguro para convertir a JSON.
         return {
-            "has_permission": lambda code: code in permisos_lista,
             "codes": permisos_lista,
-            # Estructura compatible con frontend
             "usuarios": {
                 "ver": "USER_VIEW" in permisos_lista,
                 "crear": "USER_CREATE" in permisos_lista,
@@ -157,7 +158,7 @@ class Usuario(Base, TimestampMixin):
             login_username=username,
             password_hash=password_hash,
             personal_id_rrhh=personal_id,
-            id_rol=1  # Rol de empleado
+            id_rol=1  # Rol de empleado por defecto
         )
         db_session.add(nuevo_usuario)
         db_session.commit()

@@ -1,5 +1,7 @@
+# app/services/user.py
+
 from typing import List, Optional, Union
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import text, and_
 from ..models.user import Usuario, Rol, Permiso, RolPermiso
 from ..schemas.user import UsuarioCreate, UsuarioUpdate, RolCreate, RolUpdate
@@ -77,7 +79,10 @@ class UserService:
 
     def get_user_by_username(self, username: str) -> Optional[Usuario]:
         """Get user by username"""
-        return self.db.query(Usuario).filter(Usuario.login_username == username).first()
+        return self.db.query(Usuario).options(
+            joinedload(Usuario.rol).joinedload(Rol.permisos)
+        ).filter(Usuario.login_username == username).first()
+
 
     def update_user(self, user_id: int, user_data: UsuarioUpdate) -> Usuario:
         """Update user"""
@@ -129,8 +134,11 @@ class UserService:
                 )
 
         # Hash password if provided
-        if 'password' in update_data:
+        if 'password' in update_data and update_data['password']:
             update_data['password_hash'] = get_password_hash(update_data.pop('password'))
+        else:
+            update_data.pop('password', None)
+
 
         # Update user
         for field, value in update_data.items():
@@ -160,7 +168,7 @@ class UserService:
 
     def get_role(self, role_id: int) -> Optional[Rol]:
         """Get role by ID"""
-        return self.db.query(Rol).filter(Rol.id_rol == role_id).first()
+        return self.db.query(Rol).options(joinedload(Rol.permisos)).filter(Rol.id_rol == role_id).first()
 
     def create_role(self, role_data: RolCreate) -> Rol:
         """Create new role"""
@@ -243,31 +251,42 @@ class UserService:
         """Get all permissions"""
         return self.db.query(Permiso).order_by(Permiso.modulo, Permiso.accion).all()
 
-    # ✅ NUEVO MÉTODO: Obtener permisos específicos de un rol
-    def get_user_permissions_by_role(self, role_id: int) -> List[Permiso]:
-        """Get permissions for a specific role"""
-        return (
-            self.db.query(Permiso)
-            .join(RolPermiso, Permiso.id_permiso == RolPermiso.id_permiso)
-            .filter(RolPermiso.id_rol == role_id)
-            .all()
-        )
+    def get_user_permissions_by_role(self, role_id: int) -> dict:
+        """
+        Get permissions for a specific role and return them in a
+        structured dictionary for the frontend.
+        """
+        # --- CORRECCIÓN APLICADA AQUÍ ---
+        # Se usa .c.<column_name> para acceder a las columnas de la tabla RolPermiso
+        permisos_query = self.db.query(
+            Permiso.modulo,
+            Permiso.accion,
+            Permiso.codigo
+        ).join(
+            RolPermiso, Permiso.id_permiso == RolPermiso.c.id_permiso
+        ).filter(
+            RolPermiso.c.id_rol == role_id
+        ).all()
+
+        estructura = {}
+        codigos = []
+        for modulo, accion, codigo in permisos_query:
+            if modulo not in estructura:
+                estructura[modulo] = {}
+            estructura[modulo][accion] = True
+            codigos.append(codigo)
+
+        return {"codes": codigos, "estructura": estructura}
 
     def assign_permission_to_role(self, role_id: int, permission_id: int) -> bool:
         """Assign permission to role"""
         role = self.get_role(role_id)
         if not role:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Role not found"
-            )
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
 
         permission = self.db.query(Permiso).filter(Permiso.id_permiso == permission_id).first()
         if not permission:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Permission not found"
-            )
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Permission not found")
 
         if permission not in role.permisos:
             role.permisos.append(permission)
@@ -279,17 +298,11 @@ class UserService:
         """Remove permission from role"""
         role = self.get_role(role_id)
         if not role:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Role not found"
-            )
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
 
         permission = self.db.query(Permiso).filter(Permiso.id_permiso == permission_id).first()
         if not permission:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Permission not found"
-            )
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Permission not found")
 
         if permission in role.permisos:
             role.permisos.remove(permission)
@@ -310,11 +323,16 @@ class UserService:
             return result.fetchone() is not None
         except Exception as e:
             print(f"Error verifying personal in RRHH: {e}")
-            return True  # Allow creation if RRHH check fails
+            # En un entorno de desarrollo, podría ser útil permitir que esto falle
+            # sin bloquear la creación de usuarios. En producción, podría ser False.
+            return True
 
     def get_user_permissions(self, user_id: int) -> dict:
         """Get user permissions from role"""
-        user = self.get_user(user_id)
+        user = self.db.query(Usuario).options(
+            joinedload(Usuario.rol).joinedload(Rol.permisos)
+        ).filter(Usuario.id_usuario == user_id).first()
+        
         if not user or not user.rol:
             return {}
         return user.get_permissions()
