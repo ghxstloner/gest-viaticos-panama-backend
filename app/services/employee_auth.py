@@ -82,50 +82,7 @@ class EmployeeAuthService:
                 "nombre_rol": "Empleado",
                 "descripcion": "Empleado del sistema",
                 "es_rol_empleado": True,
-                "permisos_json": {
-                    "dashboard": {"ver": True},
-                    "misiones": {
-                        "ver": True,
-                        "crear": True,
-                        "ver_propias": True
-                    },
-                    "perfil": {
-                        "ver": True,
-                        "editar": True
-                    },
-                    "solicitudes": {
-                        "ver": True,
-                        "crear": True
-                    },
-                    "informes": {
-                        "ver": True,
-                        "crear": True,
-                        "presentar": True
-                    }
-                }
             },
-            # Permisos directos para compatibilidad
-            "permissions": {
-                "dashboard": {"ver": True},
-                "misiones": {
-                    "ver": True,
-                    "crear": True,
-                    "ver_propias": True
-                },
-                "perfil": {
-                    "ver": True,
-                    "editar": True
-                },
-                "solicitudes": {
-                    "ver": True,
-                    "crear": True
-                },
-                "informes": {
-                    "ver": True,
-                    "crear": True,
-                    "presentar": True
-                }
-            }
         }
 
         return LoginResponse(
