@@ -161,23 +161,17 @@ async def get_permisos_estructura(
     """Get user permissions organized by module and action"""
     user_service = UserService(db)
     
-    # ✅ Obtener el ID del rol del usuario
+    # Obtener el ID del rol del usuario
     if isinstance(current_user, dict):  # Es empleado
         user_role_id = 1  # Los empleados siempre tienen rol 1 (Solicitante)
     else:  # Es usuario financiero
         user_role_id = current_user.id_rol
     
-    # ✅ Obtener los permisos específicos del usuario
+    # Obtener los permisos específicos del usuario
     permisos_usuario = user_service.get_user_permissions_by_role(user_role_id)
     
-    # ✅ Organizar en estructura dinámica para el frontend
-    estructura = {}
-    for permiso in permisos_usuario:
-        if permiso.modulo not in estructura:
-            estructura[permiso.modulo] = {}
-        estructura[permiso.modulo][permiso.accion] = True
-    
-    return estructura
+    # ✅ SIMPLEMENTE RETORNAR LA ESTRUCTURA QUE YA VIENE CONSTRUIDA
+    return permisos_usuario["estructura"]
 
 @router.post("/roles/{role_id}/permisos/{permission_id}")
 async def assign_permission_to_role(
