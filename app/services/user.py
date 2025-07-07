@@ -336,3 +336,57 @@ class UserService:
         if not user or not user.rol:
             return {}
         return user.get_permissions()
+
+
+    # === MÉTODOS FALTANTES PARA GESTIÓN COMPLETA DE PERMISOS ===
+    
+    def get_all_permisos(self) -> List[Permiso]:
+        """Get ALL available permissions (for admin use)"""
+        return self.db.query(Permiso).order_by(Permiso.modulo, Permiso.accion).all()
+    
+    def get_role_permissions(self, role_id: int) -> List[Permiso]:
+        """Get all permissions for a specific role"""
+        role = self.db.query(Rol).options(
+            joinedload(Rol.permisos)
+        ).filter(Rol.id_rol == role_id).first()
+        
+        if not role:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Role not found"
+            )
+        
+        return role.permisos
+    
+    def update_role_permissions(self, role_id: int, permission_ids: List[int]) -> Rol:
+        """Update all permissions for a role (replace existing permissions)"""
+        role = self.db.query(Rol).options(
+            joinedload(Rol.permisos)
+        ).filter(Rol.id_rol == role_id).first()
+        
+        if not role:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Role not found"
+            )
+        
+        # Obtener todos los permisos por IDs
+        new_permissions = self.db.query(Permiso).filter(
+            Permiso.id_permiso.in_(permission_ids)
+        ).all()
+        
+        # Verificar que todos los permisos existen
+        if len(new_permissions) != len(permission_ids):
+            found_ids = [p.id_permiso for p in new_permissions]
+            missing_ids = [pid for pid in permission_ids if pid not in found_ids]
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Permissions not found: {missing_ids}"
+            )
+        
+        # Reemplazar todos los permisos del rol
+        role.permisos = new_permissions
+        self.db.commit()
+        self.db.refresh(role)
+        
+        return role
