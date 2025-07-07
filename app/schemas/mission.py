@@ -64,7 +64,6 @@ class MisionCreate(BaseModel):
     observaciones_especiales: Optional[str] = None
 
     # --- Campos para VIATICOS ---
-    codnivel1_solicitante: Optional[int] = None
     destino_mision: Optional[str] = Field(None, min_length=1, max_length=255)
     fecha_salida: Optional[datetime] = None
     fecha_retorno: Optional[datetime] = None
@@ -77,7 +76,6 @@ class MisionCreate(BaseModel):
     partidas_presupuestarias: Optional[List[MisionPartidaPresupuestariaCreate]] = []
 
     # --- Campos para CAJA MENUDA ---
-    codnivel1_destino_cm: Optional[int] = None
     codnivel2_destino_cm: Optional[int] = None
     monto_solicitado: Optional[Decimal] = Field(None, gt=0)
     
@@ -85,7 +83,7 @@ class MisionCreate(BaseModel):
     def check_mission_type_fields(cls, values):
         tipo_mision = values.get('tipo_mision')
         if tipo_mision == TipoMision.VIATICOS:
-            required_fields = ['codnivel1_solicitante', 'destino_mision', 'fecha_salida', 'fecha_retorno', 'categoria_beneficiario', 'tipo_viaje']
+            required_fields = ['destino_mision', 'fecha_salida', 'fecha_retorno', 'categoria_beneficiario', 'tipo_viaje']
             for field in required_fields:
                 if values.get(field) is None:
                     raise ValueError(f"Para viáticos, el campo '{field}' es obligatorio.")
@@ -93,7 +91,7 @@ class MisionCreate(BaseModel):
                 raise ValueError("Para viajes internacionales, el campo 'region_exterior' es obligatorio.")
         
         elif tipo_mision == TipoMision.CAJA_MENUDA:
-            required_fields = ['codnivel1_destino_cm', 'codnivel2_destino_cm', 'monto_solicitado']
+            required_fields = ['codnivel2_destino_cm', 'monto_solicitado']
             for field in required_fields:
                 if values.get(field) is None:
                     raise ValueError(f"Para caja menuda, el campo '{field}' es obligatorio.")
@@ -123,8 +121,6 @@ class Mision(BaseModel):
     
     id_mision: int
     numero_solicitud: Optional[str] = None
-    codnivel1_solicitante: Optional[int] = None
-    codnivel1_destino_cm: Optional[int] = None
     codnivel2_destino_cm: Optional[int] = None
     tipo_mision: TipoMision
     beneficiario_personal_id: int
