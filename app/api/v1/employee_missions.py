@@ -665,3 +665,42 @@ async def get_limits(db_financiero: Session = Depends(get_db_financiero)):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error obteniendo límites del sistema"
         )
+
+@router.get("/organizational-structure", summary="Obtener estructura organizacional")
+async def get_organizational_structure(db_rrhh: Session = Depends(get_db_rrhh)):
+    """
+    Obtiene la estructura organizacional (nivel1 y nivel2) desde RRHH.
+    """
+    try:
+        # Obtener nivel 1 (vicepresidencias)
+        nivel1_result = db_rrhh.execute(text("""
+            SELECT codorg, descrip 
+            FROM aitsa_rrhh.nomnivel1 
+            ORDER BY descrip
+        """))
+        
+        nivel1 = [{"codorg": row.codorg, "descrip": row.descrip} for row in nivel1_result.fetchall()]
+        
+        # Obtener nivel 2 (departamentos)
+        nivel2_result = db_rrhh.execute(text("""
+            SELECT codorg, descrip, gerencia 
+            FROM aitsa_rrhh.nomnivel2 
+            ORDER BY descrip
+        """))
+        
+        nivel2 = [{"codorg": row.codorg, "descrip": row.descrip, "gerencia": row.gerencia} for row in nivel2_result.fetchall()]
+        
+        return {
+            "success": True,
+            "data": {
+                "nivel1": nivel1,
+                "nivel2": nivel2
+            }
+        }
+        
+    except Exception as e:
+        print(f"Error obteniendo estructura organizacional: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error obteniendo estructura organizacional"
+        )

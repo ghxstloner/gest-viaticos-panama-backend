@@ -220,3 +220,34 @@ async def verify_personal_in_rrhh(
     user_service = UserService(db)
     exists = user_service.verify_personal_in_rrhh(personal_id)
     return {"exists": exists, "personal_id": personal_id}
+
+@router.get("/roles/{role_id}/permisos", response_model=List[Permiso])
+async def get_role_permissions(
+    role_id: int,
+    db: Session = Depends(get_db_financiero),
+    current_user: UsuarioModel = Depends(get_current_user)
+):
+    """Get all permissions for a specific role"""
+    user_service = UserService(db)
+    return user_service.get_role_permissions(role_id)
+
+@router.put("/roles/{role_id}/permisos", response_model=Rol)
+async def update_role_permissions(
+    role_id: int,
+    permission_data: Dict[str, List[int]],  # {"permission_ids": [1, 2, 3]}
+    db: Session = Depends(get_db_financiero),
+    current_user: UsuarioModel = Depends(get_current_user)
+):
+    """Update all permissions for a role"""
+    user_service = UserService(db)
+    permission_ids = permission_data.get("permission_ids", [])
+    return user_service.update_role_permissions(role_id, permission_ids)
+
+@router.get("/permisos/all", response_model=List[Permiso])
+async def get_all_permisos(
+    db: Session = Depends(get_db_financiero),
+    current_user: UsuarioModel = Depends(get_current_user)
+):
+    """Get ALL available permissions (for admin use)"""
+    user_service = UserService(db)
+    return user_service.get_all_permisos()
