@@ -70,16 +70,11 @@ def get_beneficiary_names(db_rrhh: Session, personal_ids: List[int]) -> Dict[int
         AND estado != 'De Baja'
     """)
     
-    print(f"🔍 SQL Query: {query}")
-    print(f"🔍 SQL Params: {params}")
-    
     try:
         result = db_rrhh.execute(query, params)
         rows = result.fetchall()
-        print(f"🔍 Raw SQL result: {[(row.personal_id, row.apenom) for row in rows]}")
         
         names_dict = {row.personal_id: row.apenom for row in rows}
-        print(f"✅ Final names dict: {names_dict}")
         return names_dict
     except Exception as e:
         print(f"❌ Error obteniendo nombres de beneficiarios: {e}")
