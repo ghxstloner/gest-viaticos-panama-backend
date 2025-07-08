@@ -8,16 +8,18 @@ from datetime import timedelta
 from app.core.security import verify_md5_password, create_access_token
 from app.core.config import settings
 from app.schemas.auth import LoginResponse
+from app.services.user import UserService
 
 class EmployeeAuthService:
-    def __init__(self, db: Session):
-        self.db = db
+    def __init__(self, db: Session, db_financiero: Optional[Session] = None):
+        self.db = db  # Base de datos de RRHH
+        self.db_financiero = db_financiero  # Base de datos financiera para permisos
 
     def authenticate_employee(self, cedula: str, password: str) -> Optional[dict]:
         """Autentica a un empleado desde la tabla nompersonal de aitsa_rrhh."""
         try:
             query = text("""
-                SELECT personal_id, cedula, apenom, estado, usr_password, email, telefonos
+                SELECT personal_id, cedula, apenom, estado, usr_password, email, telefonos, IdDepartamento
                 FROM nompersonal
                 WHERE cedula = :cedula
             """)
@@ -42,6 +44,35 @@ class EmployeeAuthService:
         except Exception as e:
             print(f"Error durante la autenticación del empleado: {e}")
             return None
+    
+    def check_if_department_head(self, cedula: str) -> bool:
+        """Verifica si el empleado es jefe de algún departamento"""
+        try:
+            query = text("""
+                SELECT COUNT(*) as count
+                FROM aitsa_rrhh.departamento 
+                WHERE IdJefe = :cedula
+            """)
+            result = self.db.execute(query, {"cedula": cedula})
+            count = result.fetchone()
+            return count.count > 0 if count else False
+        except Exception as e:
+            print(f"Error verificando si es jefe de departamento: {e}")
+            return False
+    
+    def get_managed_departments(self, cedula: str) -> list:
+        """Obtiene los departamentos que maneja un jefe"""
+        try:
+            query = text("""
+                SELECT IdDepartamento, Descripcion
+                FROM aitsa_rrhh.departamento 
+                WHERE IdJefe = :cedula
+            """)
+            result = self.db.execute(query, {"cedula": cedula})
+            return [{"id": row.IdDepartamento, "descripcion": row.Descripcion} for row in result.fetchall()]
+        except Exception as e:
+            print(f"Error obteniendo departamentos gestionados: {e}")
+            return []
 
     def login(self, cedula: str, password: str) -> Optional[LoginResponse]:
         """Realiza el login de un empleado y genera un token."""
@@ -49,19 +80,36 @@ class EmployeeAuthService:
         if not employee:
             return None
 
+        # ✅ CRÍTICO: Verificar si es jefe de departamento
+        is_department_head = self.check_if_department_head(cedula)
+        managed_departments = self.get_managed_departments(cedula) if is_department_head else []
+        
+        # Determinar el rol basado en si es jefe o no
+        role_id = 2 if is_department_head else 1  # 2 = Jefe Inmediato, 1 = Solicitante
+        role_name = "Jefe Inmediato" if is_department_head else "Solicitante"
+
         # Crear token con datos completos para empleado
         token_data = {
             "sub": f"employee:{employee['cedula']}",
             "type": "employee",
             "personal_id": employee["personal_id"],
             "cedula": employee["cedula"],
-            "nombre": employee["apenom"]
+            "nombre": employee["apenom"],
+            "is_department_head": is_department_head,
+            "managed_departments": managed_departments,
+            "id_rol": role_id  # ✅ INCLUIR ID DEL ROL EN EL TOKEN
         }
         
         expires_delta = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
         access_token = create_access_token(data=token_data, expires_delta=expires_delta)
 
-        # Estructura de respuesta para empleados con permisos básicos
+        # ✅ OBTENER PERMISOS DINÁMICAMENTE SEGÚN EL ROL ASIGNADO
+        # Usar la base de datos financiera si está disponible, sino usar la de RRHH
+        db_for_permissions = self.db_financiero if self.db_financiero else self.db
+        user_service = UserService(db_for_permissions)
+        permisos_usuario = user_service.get_user_permissions_by_role(role_id)
+        
+        # Estructura de respuesta para empleados con permisos dinámicos
         user_data = {
             "id": employee['personal_id'],
             "id_usuario": employee['personal_id'],  # Para compatibilidad
@@ -73,16 +121,19 @@ class EmployeeAuthService:
             "username": employee['cedula'],  # Para compatibilidad con frontend
             "login_username": employee['cedula'],
             "nombre_completo": employee['apenom'],
-            "role": "Empleado",
+            "role": role_name,
             "userType": "empleado",
             "is_active": True,
-            "id_rol": 1,  # Rol de empleado
+            "id_rol": role_id,
+            "is_department_head": is_department_head,
+            "managed_departments": managed_departments,
             "rol": {
-                "id_rol": 1,
-                "nombre_rol": "Empleado",
-                "descripcion": "Empleado del sistema",
+                "id_rol": role_id,
+                "nombre_rol": role_name,
+                "descripcion": f"Empleado con rol de {role_name}",
                 "es_rol_empleado": True,
             },
+            "permisos_usuario": permisos_usuario["estructura"]  # ✅ PERMISOS DINÁMICOS
         }
 
         return LoginResponse(

@@ -163,7 +163,8 @@ async def get_permisos_estructura(
     
     # Obtener el ID del rol del usuario
     if isinstance(current_user, dict):  # Es empleado
-        user_role_id = 1  # Los empleados siempre tienen rol 1 (Solicitante)
+        # ✅ DINÁMICO: Usar el rol que viene del token del empleado
+        user_role_id = current_user.get('id_rol', 1)  # Fallback al rol 1 si no existe
     else:  # Es usuario financiero
         user_role_id = current_user.id_rol
     

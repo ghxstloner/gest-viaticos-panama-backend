@@ -67,13 +67,14 @@ def login_financiero(
 @router.post("/login/empleado", response_model=LoginResponse, tags=["Authentication"])
 def login_empleado(
     form_data: OAuth2PasswordRequestForm = Depends(),
-    db: Session = Depends(get_db_rrhh)
+    db_rrhh: Session = Depends(get_db_rrhh),
+    db_financiero: Session = Depends(get_db_financiero)
 ):
     """
     Login para empleados/colaboradores.
     Usa la cédula como username y la contraseña en formato MD5.
     """
-    auth_service = EmployeeAuthService(db)
+    auth_service = EmployeeAuthService(db_rrhh, db_financiero)
     # El username del formulario será la cédula del empleado
     result = auth_service.login(cedula=form_data.username, password=form_data.password)
     

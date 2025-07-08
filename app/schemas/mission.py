@@ -161,6 +161,7 @@ class MisionListResponseItem(BaseModel):
     tipo_mision: TipoMision
     objetivo_mision: Optional[str]
     destino_mision: Optional[str]
+    beneficiario_nombre: Optional[str]
     fecha_salida: Optional[datetime]
     monto_total_calculado: Decimal
     estado_flujo: EstadoFlujo

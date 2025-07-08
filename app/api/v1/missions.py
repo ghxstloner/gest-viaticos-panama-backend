@@ -4,7 +4,7 @@
 
 import os
 import uuid
-from typing import List, Optional
+from typing import List, Optional, Dict
 from datetime import date
 
 from fastapi import (
@@ -40,6 +40,50 @@ ALLOWED_EXTENSIONS = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".png", ".jpg", 
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+# ===============================================
+# FUNCIÓN HELPER PARA OBTENER NOMBRES DE BENEFICIARIOS
+# ===============================================
+
+def get_beneficiary_names(db_rrhh: Session, personal_ids: List[int]) -> Dict[int, str]:
+    """Helper para obtener nombres de beneficiarios desde RRHH"""
+    print(f"🔍 get_beneficiary_names called with personal_ids: {personal_ids}")
+    
+    if not personal_ids:
+        print("❌ No personal_ids provided, returning empty dict")
+        return {}
+    
+    # Construir consulta SQL dinámica
+    if len(personal_ids) == 1:
+        condition = "= :personal_id"
+        params = {"personal_id": personal_ids[0]}
+    else:
+        placeholders = ','.join(str(pid) for pid in personal_ids)
+        condition = f"IN ({placeholders})"
+        params = {}
+    
+    query = text(f"""
+        SELECT personal_id, apenom
+        FROM aitsa_rrhh.nompersonal 
+        WHERE personal_id {condition}
+        AND estado != 'De Baja'
+    """)
+    
+    print(f"🔍 SQL Query: {query}")
+    print(f"🔍 SQL Params: {params}")
+    
+    try:
+        result = db_rrhh.execute(query, params)
+        rows = result.fetchall()
+        print(f"🔍 Raw SQL result: {[(row.personal_id, row.apenom) for row in rows]}")
+        
+        names_dict = {row.personal_id: row.apenom for row in rows}
+        print(f"✅ Final names dict: {names_dict}")
+        return names_dict
+    except Exception as e:
+        print(f"❌ Error obteniendo nombres de beneficiarios: {e}")
+        return {}
 
 
 # --- Endpoints Principales de Misiones (Para usuarios financieros) ---
@@ -105,6 +149,7 @@ async def get_missions(
     fecha_desde: Optional[date] = Query(None),
     fecha_hasta: Optional[date] = Query(None),
     db: Session = Depends(get_db_financiero),
+    db_rrhh: Session = Depends(get_db_rrhh),  # ✅ AGREGADO
     current_user: Usuario = Depends(get_current_user)
 ):
     """
@@ -120,14 +165,21 @@ async def get_missions(
         tipo_mision=tipo_mision, fecha_desde=fecha_desde, fecha_hasta=fecha_hasta
     )
     
+    # ✅ OBTENER NOMBRES DE BENEFICIARIOS
+    personal_ids = [m.beneficiario_personal_id for m in result["items"] if m.beneficiario_personal_id]
+    beneficiary_names = get_beneficiary_names(db_rrhh, personal_ids)
+    
     response_items = []
     for m in result["items"]:
+        beneficiary_name = beneficiary_names.get(m.beneficiario_personal_id, "Empleado no encontrado")
+        
         mission_dict = {
             "id_mision": m.id_mision,
             "numero_solicitud": m.numero_solicitud,
             "tipo_mision": m.tipo_mision,
             "objetivo_mision": m.objetivo_mision,
             "destino_mision": m.destino_mision,
+            "beneficiario_nombre": beneficiary_name,  # ✅ INCLUIDO
             "fecha_salida": m.fecha_salida,
             "monto_total_calculado": m.monto_total_calculado,
             "estado_flujo": {
@@ -210,11 +262,15 @@ async def get_employee_missions(
         # Paginación
         skip = (page - 1) * size
         total = query.count()
-        items = query.order_by(MisionModel.created_at.desc()).offset(skip).limit(size).all()
+        missions = query.order_by(MisionModel.created_at.desc()).offset(skip).limit(size).all()
         
-        # Construir respuesta manualmente
+        # ✅ OBTENER NOMBRES DE BENEFICIARIOS
+        personal_ids = [m.beneficiario_personal_id for m in missions if m.beneficiario_personal_id]
+        beneficiary_names = get_beneficiary_names(db_rrhh, personal_ids)
+        
+        # Construir respuesta
         response_items = []
-        for mission in items:
+        for mission in missions:
             # Asegurar que estado_flujo está cargado
             if not mission.estado_flujo:
                 estado = db_financiero.query(EstadoFlujo).filter(
@@ -222,13 +278,16 @@ async def get_employee_missions(
                 ).first()
                 mission.estado_flujo = estado
             
-            # Crear objeto manualmente para evitar errores de validación
+            beneficiary_name = beneficiary_names.get(mission.beneficiario_personal_id, "Empleado no encontrado")
+            
+            # Crear objeto con TODOS los campos requeridos
             mission_item = {
                 "id_mision": mission.id_mision,
                 "numero_solicitud": mission.numero_solicitud,
                 "tipo_mision": mission.tipo_mision,
                 "objetivo_mision": mission.objetivo_mision,
                 "destino_mision": mission.destino_mision,
+                "beneficiario_nombre": beneficiary_name,  # ✅ INCLUIDO
                 "fecha_salida": mission.fecha_salida,
                 "monto_total_calculado": mission.monto_total_calculado,
                 "estado_flujo": {

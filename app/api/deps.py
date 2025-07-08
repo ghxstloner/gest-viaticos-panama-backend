@@ -131,6 +131,68 @@ def get_current_user_universal(
             
     except ValueError:
         raise credentials_exception
+    
+def get_current_employee_with_role(
+    db_financiero: Session = Depends(get_db_financiero),
+    db_rrhh: Session = Depends(get_db_rrhh),
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+    ) -> dict:
+    """
+    Obtiene el empleado actual con información de rol (jefe o empleado regular)
+    """
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="No se pudieron validar las credenciales del empleado",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    try:
+        payload = jwt.decode(
+            credentials.credentials, 
+            settings.SECRET_KEY, 
+            algorithms=[settings.ALGORITHM]
+        )
+        subject: str = payload.get("sub")
+        token_type: str = payload.get("type", "")
+        
+        if subject is None or not subject.startswith("employee:") or token_type != "employee":
+            raise credentials_exception
+            
+        cedula = subject.split(":")[1]
+        
+    except (JWTError, IndexError):
+        raise credentials_exception
+
+    # Obtener datos del empleado
+    query = text("SELECT personal_id, cedula, apenom, email, IdDepartamento FROM nompersonal WHERE cedula = :cedula AND estado != 'De Baja'")
+    result = db_rrhh.execute(query, {"cedula": cedula})
+    employee = result.fetchone()
+
+    if employee is None:
+        raise credentials_exception
+
+    employee_data = dict(employee._mapping)
+
+    # Verificar si es jefe de departamento
+    jefe_query = text("SELECT COUNT(*) as count FROM departamento WHERE IdJefe = :cedula")
+    jefe_result = db_rrhh.execute(jefe_query, {"cedula": cedula})
+    is_department_head = jefe_result.fetchone().count > 0
+
+    # Obtener departamentos gestionados si es jefe
+    managed_departments = []
+    if is_department_head:
+        dept_query = text("SELECT IdDepartamento, Descripcion FROM departamento WHERE IdJefe = :cedula")
+        dept_result = db_rrhh.execute(dept_query, {"cedula": cedula})
+        managed_departments = [{"id": row.IdDepartamento, "descripcion": row.Descripcion} for row in dept_result.fetchall()]
+
+    employee_data.update({
+        "is_department_head": is_department_head,
+        "managed_departments": managed_departments,
+        "role_id": 2 if is_department_head else 1,
+        "role_name": "Jefe Inmediato" if is_department_head else "Solicitante"
+    })
+        
+    return employee_data
 
 def check_permissions(required_permissions: List[str]):
     """

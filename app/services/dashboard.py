@@ -1,6 +1,6 @@
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Union
 from sqlalchemy.orm import Session
-from sqlalchemy import func, and_, extract
+from sqlalchemy import func, and_, extract, text
 from datetime import datetime, date, timedelta
 from decimal import Decimal
 
@@ -13,8 +13,14 @@ class DashboardService:
     def __init__(self, db: Session):
         self.db = db
 
-    def get_dashboard_stats(self, user: Usuario) -> Dict[str, Any]:
+    def get_dashboard_stats(self, user: Union[Usuario, dict]) -> Dict[str, Any]:
         """Obtener estadísticas del dashboard según el rol del usuario"""
+        
+        # Si es un empleado (dict)
+        if isinstance(user, dict):
+            return self._get_employee_stats(user)
+            
+        # Si es un usuario financiero (Usuario)
         stats = {
             "resumen": self._get_resumen_general(user),
             "por_estado": self._get_misiones_por_estado(user),
@@ -31,6 +37,96 @@ class DashboardService:
             stats["pagos_pendientes"] = self._get_pagos_pendientes()
 
         return stats
+
+    def _get_employee_stats(self, employee: dict) -> Dict[str, Any]:
+        """Obtener estadísticas específicas para empleados"""
+        personal_id = employee.get('personal_id')
+        
+        # Consulta base para misiones del empleado
+        base_query = self.db.query(Mision).filter(
+            Mision.beneficiario_personal_id == personal_id
+        )
+        
+        # Estadísticas generales
+        total_misiones = base_query.count()
+        misiones_mes = base_query.filter(
+            extract('month', Mision.created_at) == datetime.now().month,
+            extract('year', Mision.created_at) == datetime.now().year
+        ).count()
+        
+        # Estadísticas por estado
+        estados_query = base_query.join(EstadoFlujo).group_by(
+            EstadoFlujo.nombre_estado
+        ).with_entities(
+            EstadoFlujo.nombre_estado,
+            func.count(Mision.id_mision).label('cantidad')
+        )
+        
+        misiones_por_estado = {
+            estado: cantidad
+            for estado, cantidad in estados_query.all()
+        }
+        
+        # Estadísticas por tipo
+        tipos_query = base_query.group_by(
+            Mision.tipo_mision
+        ).with_entities(
+            Mision.tipo_mision,
+            func.count(Mision.id_mision).label('cantidad')
+        )
+        
+        misiones_por_tipo = {
+            tipo.value: cantidad
+            for tipo, cantidad in tipos_query.all()
+        }
+        
+        # Montos
+        montos = base_query.with_entities(
+            func.sum(Mision.monto_total_calculado).label('total_solicitado'),
+            func.sum(Mision.monto_aprobado).label('total_aprobado')
+        ).first()
+        
+        monto_mes = base_query.filter(
+            extract('month', Mision.created_at) == datetime.now().month,
+            extract('year', Mision.created_at) == datetime.now().year
+        ).with_entities(
+            func.sum(Mision.monto_total_calculado)
+        ).scalar() or Decimal('0.00')
+        
+        return {
+            "empleado": {
+                "cedula": employee.get('cedula'),
+                "nombre": employee.get('apenom'),
+            },
+            "resumen_general": {
+                "total_misiones": total_misiones,
+                "misiones_mes": misiones_mes,
+                "misiones_ano": base_query.filter(
+                    extract('year', Mision.created_at) == datetime.now().year
+                ).count(),
+                "pendientes_revision": base_query.join(EstadoFlujo).filter(
+                    EstadoFlujo.es_estado_final == False
+                ).count(),
+                "aprobadas_total": base_query.join(EstadoFlujo).filter(
+                    EstadoFlujo.nombre_estado == "APROBADO"
+                ).count(),
+                "pagadas_total": base_query.join(EstadoFlujo).filter(
+                    EstadoFlujo.nombre_estado == "PAGADO"
+                ).count(),
+                "rechazadas_total": base_query.join(EstadoFlujo).filter(
+                    EstadoFlujo.nombre_estado == "RECHAZADO"
+                ).count()
+            },
+            "montos": {
+                "total_solicitado": float(montos.total_solicitado or 0),
+                "total_aprobado": float(montos.total_aprobado or 0),
+                "monto_mes": float(monto_mes)
+            },
+            "estadisticas": {
+                "misiones_por_estado": misiones_por_estado,
+                "misiones_por_tipo": misiones_por_tipo
+            }
+        }
 
     def _get_resumen_general(self, user: Usuario) -> Dict[str, Any]:
         """Obtener resumen general de misiones"""

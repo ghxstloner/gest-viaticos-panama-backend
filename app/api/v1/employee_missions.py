@@ -471,7 +471,7 @@ async def create_petty_cash(
         # Crear misión principal
         mision = MisionModel(
             numero_solicitud=numero_solicitud,
-            codnivel2_destino_cm=int(request.para),
+            destino_codnivel2=int(request.para),
             tipo_mision=TipoMision.CAJA_MENUDA,
             beneficiario_personal_id=personal_id,
             categoria_beneficiario='TITULAR',  # Siempre TITULAR para caja menuda
