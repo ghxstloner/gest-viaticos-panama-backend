@@ -12,6 +12,7 @@ from app.core.config import settings
 from app.models.user import Usuario
 from app.core.database import get_db_financiero, get_db_rrhh
 from app.core.security import decode_access_token
+from typing import Union, Optional
 
 # Esquema de seguridad para los endpoints
 security = HTTPBearer()
@@ -226,3 +227,56 @@ def require_role(allowed_roles: List[int]):
             return await func(*args, current_user=current_user, **kwargs)
         return wrapper
     return decorator
+
+
+def get_current_user_or_employee(
+    current_user: Optional[Usuario] = Depends(get_current_user),
+    current_employee: Optional[dict] = Depends(get_current_employee)
+) -> Union[Usuario, dict]:
+    """
+    Dependency que retorna el usuario actual, ya sea financiero o empleado.
+    Útil para endpoints que pueden ser accedidos por ambos tipos de usuarios.
+    """
+    if current_user:
+        return current_user
+    elif current_employee:
+        return current_employee
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Usuario no autenticado"
+        )
+
+def require_financial_user(
+    current_user: Usuario = Depends(get_current_user)
+) -> Usuario:
+    """
+    Dependency que requiere específicamente un usuario financiero.
+    """
+    financial_roles = [
+        "Analista Tesorería", "Analista Presupuesto", "Analista Contabilidad",
+        "Director Finanzas", "Fiscalizador CGR", "Custodio Caja Menuda",
+        "Administrador Sistema"
+    ]
+    
+    if current_user.rol.nombre_rol not in financial_roles:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Se requiere un usuario con rol financiero"
+        )
+    
+    return current_user
+
+def require_department_head(
+    current_employee: dict = Depends(get_current_employee_with_role)
+) -> dict:
+    """
+    Dependency que requiere específicamente un jefe de departamento.
+    """
+    if not current_employee.get("is_department_head"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Se requiere ser jefe de departamento"
+        )
+    
+    return current_employee
