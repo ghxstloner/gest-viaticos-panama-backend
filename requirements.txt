@@ -11,3 +11,4 @@ psycopg2-binary==2.9.10
 python-dotenv==1.1.1
 xlsxwriter==3.2.0
 aiofiles==24.1.0
+pydantic[email]

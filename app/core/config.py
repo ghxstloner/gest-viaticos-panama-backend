@@ -21,8 +21,8 @@ class Settings(BaseSettings):
     WEBHOOK_SECRET_TOKEN: Optional[str] = Field(None, description="Secret token to validate webhooks")
 
     # ✅ NUEVAS CONFIGURACIONES FRONTEND
-    FRONTEND_URL: str = Field(default="http://localhost:8080", description="Frontend application URL")
-    ALLOWED_ORIGINS: List[str] = Field(default_factory=lambda: ["http://localhost:8080"])
+    FRONTEND_URL: str = Field(default="http://localhost:3000", description="Frontend application URL")
+    ALLOWED_ORIGINS: List[str] = Field(default_factory=lambda: ["http://localhost:3000"])
 
     # --- Database ---
     DATABASE_URL: str = Field(..., description="Database URL for 'aitsa_financiero'")

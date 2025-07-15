@@ -27,4 +27,4 @@ api_router.include_router(admin_router, prefix="/admin", tags=["Administration"]
 api_router.include_router(reports_router, prefix="/reports", tags=["Reports"])
 api_router.include_router(dashboard_router, prefix="/dashboard", tags=["Dashboard"])
 api_router.include_router(webhooks_router, prefix="/webhooks", tags=["Webhooks"])
-api_router.include_router(workflow_router, prefix="/workflow", tags=["Workflow"])
+api_router.include_router(workflow_router)  

@@ -1,6 +1,6 @@
 # app/api/deps.py
 
-from typing import Generator, List, Union
+from typing import Generator, List, Union, Optional
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, HTTPAuthorizationCredentials, HTTPBearer
 from jose import jwt, JWTError
@@ -12,7 +12,6 @@ from app.core.config import settings
 from app.models.user import Usuario
 from app.core.database import get_db_financiero, get_db_rrhh
 from app.core.security import decode_access_token
-from typing import Union, Optional
 
 # Esquema de seguridad para los endpoints
 security = HTTPBearer()
@@ -88,12 +87,13 @@ def get_current_employee(
     return dict(employee._mapping)
 
 def get_current_user_universal(
-    token: str = Depends(oauth2_scheme),
+    credentials: HTTPAuthorizationCredentials = Depends(security),
     db_financiero: Session = Depends(get_db_financiero),
     db_rrhh: Session = Depends(get_db_rrhh)
 ) -> Union[Usuario, dict]:
     """
-    Obtiene el usuario actual, ya sea empleado o financiero
+    Obtiene el usuario actual, ya sea empleado o financiero.
+    VERSIÓN CORREGIDA que maneja ambos tipos de tokens.
     """
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -101,11 +101,23 @@ def get_current_user_universal(
         headers={"WWW-Authenticate": "Bearer"},
     )
     
+    if not credentials:
+        raise credentials_exception
+    
     try:
-        payload = decode_access_token(token)
+        # Decodificar el token JWT directamente
+        payload = jwt.decode(
+            credentials.credentials, 
+            settings.SECRET_KEY, 
+            algorithms=[settings.ALGORITHM]
+        )
+        
         token_type: str = payload.get("type", "")
+        print(f"DEBUG - Token type: {token_type}")
+        print(f"DEBUG - Payload: {payload}")
         
         if token_type == "financiero":
+            # Usuario del sistema financiero
             username: str = payload.get("sub")
             if username is None:
                 raise credentials_exception
@@ -115,22 +127,45 @@ def get_current_user_universal(
             return user
             
         elif token_type == "employee":
-            subject: str = payload.get("sub")
-            if subject is None or not subject.startswith("employee:"):
-                raise credentials_exception
-            cedula = subject.split(":")[1]
+            # Empleado - extraer datos directamente del token
+            personal_id = payload.get("personal_id")
+            cedula = payload.get("cedula")
+            nombre = payload.get("nombre")
+            is_department_head = payload.get("is_department_head", False)
+            managed_departments = payload.get("managed_departments", [])
+            id_rol = payload.get("id_rol")
             
-            query = text("SELECT personal_id, cedula, apenom, email FROM nompersonal WHERE cedula = :cedula AND estado != 'De Baja'")
-            result = db_rrhh.execute(query, {"cedula": cedula})
-            employee = result.fetchone()
-            
-            if employee is None:
+            if not personal_id or not cedula:
                 raise credentials_exception
-            return dict(employee._mapping)
+            
+            # Buscar el nombre del rol en la base de datos
+            role_query = text("SELECT nombre_rol FROM aitsa_financiero.roles WHERE id_rol = :id_rol")
+            role_result = db_financiero.execute(role_query, {"id_rol": id_rol})
+            role_row = role_result.fetchone()
+            role_name = role_row.nombre_rol if role_row else "Empleado"
+            
+            employee_data = {
+                "personal_id": personal_id,
+                "cedula": cedula,
+                "apenom": nombre,
+                "is_department_head": is_department_head,
+                "managed_departments": managed_departments,
+                "id_rol": id_rol,
+                "role_name": role_name,
+                "user_type": "employee"
+            }
+            
+            print(f"DEBUG - Employee data: {employee_data}")
+            return employee_data
         else:
+            print(f"DEBUG - Token type no válido: {token_type}")
             raise credentials_exception
             
-    except ValueError:
+    except JWTError as e:
+        print(f"DEBUG - JWT Error: {e}")
+        raise credentials_exception
+    except Exception as e:
+        print(f"DEBUG - Error general: {e}")
         raise credentials_exception
     
 def get_current_employee_with_role(
@@ -140,6 +175,7 @@ def get_current_employee_with_role(
     ) -> dict:
     """
     Obtiene el empleado actual con información de rol (jefe o empleado regular)
+    VERSIÓN CORREGIDA que extrae datos del token directamente.
     """
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -147,53 +183,54 @@ def get_current_employee_with_role(
         headers={"WWW-Authenticate": "Bearer"},
     )
 
+    if not credentials:
+        raise credentials_exception
+
     try:
         payload = jwt.decode(
             credentials.credentials, 
             settings.SECRET_KEY, 
             algorithms=[settings.ALGORITHM]
         )
-        subject: str = payload.get("sub")
+        
         token_type: str = payload.get("type", "")
         
-        if subject is None or not subject.startswith("employee:") or token_type != "employee":
+        if token_type != "employee":
             raise credentials_exception
-            
-        cedula = subject.split(":")[1]
         
-    except (JWTError, IndexError):
-        raise credentials_exception
-
-    # Obtener datos del empleado
-    query = text("SELECT personal_id, cedula, apenom, email, IdDepartamento FROM nompersonal WHERE cedula = :cedula AND estado != 'De Baja'")
-    result = db_rrhh.execute(query, {"cedula": cedula})
-    employee = result.fetchone()
-
-    if employee is None:
-        raise credentials_exception
-
-    employee_data = dict(employee._mapping)
-
-    # Verificar si es jefe de departamento
-    jefe_query = text("SELECT COUNT(*) as count FROM departamento WHERE IdJefe = :cedula")
-    jefe_result = db_rrhh.execute(jefe_query, {"cedula": cedula})
-    is_department_head = jefe_result.fetchone().count > 0
-
-    # Obtener departamentos gestionados si es jefe
-    managed_departments = []
-    if is_department_head:
-        dept_query = text("SELECT IdDepartamento, Descripcion FROM departamento WHERE IdJefe = :cedula")
-        dept_result = db_rrhh.execute(dept_query, {"cedula": cedula})
-        managed_departments = [{"id": row.IdDepartamento, "descripcion": row.Descripcion} for row in dept_result.fetchall()]
-
-    employee_data.update({
-        "is_department_head": is_department_head,
-        "managed_departments": managed_departments,
-        "role_id": 2 if is_department_head else 1,
-        "role_name": "Jefe Inmediato" if is_department_head else "Solicitante"
-    })
+        # Extraer datos directamente del token (como en tu ejemplo)
+        personal_id = payload.get("personal_id")
+        cedula = payload.get("cedula")
+        nombre = payload.get("nombre")
+        is_department_head = payload.get("is_department_head", False)
+        managed_departments = payload.get("managed_departments", [])
+        id_rol = payload.get("id_rol")
         
-    return employee_data
+        if not personal_id or not cedula:
+            raise credentials_exception
+        
+        # Buscar el nombre del rol en la base de datos
+        role_query = text("SELECT nombre_rol FROM aitsa_financiero.roles WHERE id_rol = :id_rol")
+        role_result = db_financiero.execute(role_query, {"id_rol": id_rol})
+        role_row = role_result.fetchone()
+        role_name = role_row.nombre_rol if role_row else "Empleado"
+        
+        employee_data = {
+            "personal_id": personal_id,
+            "cedula": cedula,
+            "apenom": nombre,
+            "is_department_head": is_department_head,
+            "managed_departments": managed_departments,
+            "id_rol": id_rol,
+            "role_name": role_name,
+            "user_type": "employee"
+        }
+        
+        return employee_data
+        
+    except (JWTError, IndexError) as e:
+        print(f"DEBUG - Error en get_current_employee_with_role: {e}")
+        raise credentials_exception
 
 def check_permissions(required_permissions: List[str]):
     """
@@ -227,7 +264,6 @@ def require_role(allowed_roles: List[int]):
             return await func(*args, current_user=current_user, **kwargs)
         return wrapper
     return decorator
-
 
 def get_current_user_or_employee(
     current_user: Optional[Usuario] = Depends(get_current_user),

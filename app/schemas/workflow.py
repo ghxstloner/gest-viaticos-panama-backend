@@ -164,3 +164,70 @@ class WorkflowValidationMixin:
         if not codigo or len(codigo) < 5:
             raise ValueError('El código de partida presupuestaria debe tener al menos 5 caracteres')
         return codigo.strip().upper()
+
+class WorkflowActionBase(BaseModel):
+    comentarios: Optional[str] = Field(None, max_length=500)
+    datos_adicionales: Optional[dict] = None
+
+class JefeApprovalRequest(WorkflowActionBase):
+    pass
+
+class JefeRejectionRequest(WorkflowActionBase):
+    motivo: str = Field(..., min_length=10, max_length=500)
+
+class TesoreriaApprovalRequest(WorkflowActionBase):
+    pass
+
+class PartidaPresupuestariaBase(BaseModel):
+    codigo_partida: str = Field(..., min_length=1)
+    monto: Decimal = Field(..., gt=0)
+    descripcion: Optional[str] = None
+
+class PresupuestoActionRequest(WorkflowActionBase):
+    partidas: List[PartidaPresupuestariaBase]
+
+class ContabilidadApprovalRequest(WorkflowActionBase):
+    numero_comprobante: Optional[str] = None
+
+class FinanzasApprovalRequest(WorkflowActionBase):
+    monto_aprobado: Optional[Decimal] = None
+
+class CGRApprovalRequest(WorkflowActionBase):
+    numero_refrendo: Optional[str] = None
+
+class PaymentProcessRequest(WorkflowActionBase):
+    metodo_pago: str = Field(..., description="EFECTIVO, TRANSFERENCIA, ACH")
+    fecha_pago: Optional[datetime] = None
+    numero_transaccion: Optional[str] = None
+    banco_origen: Optional[str] = None
+
+class AvailableActionsResponse(BaseModel):
+    mission_id: int
+    estado_actual: str
+    acciones_disponibles: List[dict]
+    puede_editar: bool
+    puede_eliminar: bool
+
+class WorkflowTransitionResponse(BaseModel):
+    success: bool
+    message: str
+    mission_id: int
+    estado_anterior: str
+    estado_nuevo: str
+    accion_ejecutada: str
+    requiere_accion_adicional: bool = False
+    datos_transicion: Optional[dict] = None
+
+class WorkflowStateInfo(BaseModel):
+    id_estado: int
+    nombre_estado: str
+    descripcion: str
+    es_estado_final: bool
+    tipo_flujo: str
+    orden_flujo: Optional[int]
+    acciones_posibles: List[str]
+
+class PartidaPresupuestariaResponse(BaseModel):
+    codigo_partida: str
+    descripcion: str
+    es_activa: bool

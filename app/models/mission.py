@@ -1,3 +1,5 @@
+# app/models/mission.py
+
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text, JSON, Numeric, BigInteger, Date, Enum
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 from sqlalchemy.sql import func
@@ -50,30 +52,30 @@ class Mision(Base, TimestampMixin):
 
     id_mision: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     
-    # --- Campos Nuevos y Modificados ---
-    numero_solicitud: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, comment='Corresponde al "N. de Solicitud" del formulario de viáticos')
-    destino_codnivel2: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, comment='Para Caja Menuda: "Para:". Se almacena el código del nivel 2 de la unidad administrativa destino. Es NULO para Viáticos.')
+    # --- Campos según la tabla real ---
+    numero_solicitud: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    destino_codnivel2: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     
-    tipo_mision: Mapped[TipoMision] = mapped_column(String(20), nullable=False)
+    # Campos requeridos según la tabla
+    tipo_mision: Mapped[TipoMision] = mapped_column(Enum(TipoMision), nullable=False)
     beneficiario_personal_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    
-    id_usuario_prepara: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("usuarios.id_usuario"), nullable=True, comment='FK al usuario que prepara el formulario')
-    
-    categoria_beneficiario: Mapped[Optional[CategoriaBeneficiario]] = mapped_column(String(50), nullable=True, comment='Categoría del beneficiario para cálculo de tarifas de viáticos')
-    
-    objetivo_mision: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment='Para Viáticos es "Misión Oficial", para Caja Menuda es "Trabajo a Realizar"')
-    destino_mision: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, comment='Aplica principalmente a Viáticos')
-    tipo_viaje: Mapped[Optional[TipoViaje]] = mapped_column(String(20), nullable=True, comment='Distingue si la misión de viáticos es dentro o fuera del país')
-    region_exterior: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, comment='Región para misiones de viáticos en el exterior')
-    
-    fecha_salida: Mapped[Optional[DateTime]] = mapped_column(DateTime, nullable=True, comment='En Caja Menuda puede ser una sola fecha/hora de inicio')
-    fecha_retorno: Mapped[Optional[DateTime]] = mapped_column(DateTime, nullable=True, comment='Puede no aplicar para Caja Menuda')
-    transporte_oficial: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True, comment='Campo "Transporte Oficial Si/No" del formulario de viáticos')
+    id_usuario_prepara: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("usuarios.id_usuario"), nullable=True)
+    categoria_beneficiario: Mapped[CategoriaBeneficiario] = mapped_column(Enum(CategoriaBeneficiario), nullable=False)
+    objetivo_mision: Mapped[str] = mapped_column(Text, nullable=False)
+    destino_mision: Mapped[str] = mapped_column(String(255), nullable=False)
+    tipo_viaje: Mapped[TipoViaje] = mapped_column(Enum(TipoViaje), nullable=False)
+    region_exterior: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    fecha_salida: Mapped[DateTime] = mapped_column(DateTime, nullable=False)
+    fecha_retorno: Mapped[DateTime] = mapped_column(DateTime, nullable=False)
+    transporte_oficial: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
-    monto_total_calculado: Mapped[Decimal] = mapped_column(Numeric(10, 2), default=0.00)
+    # Campos de montos y estado
+    monto_total_calculado: Mapped[Decimal] = mapped_column(Numeric(10, 2), default=0.00, nullable=False)
     monto_aprobado: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
     id_estado_flujo: Mapped[int] = mapped_column(Integer, ForeignKey("estados_flujo.id_estado_flujo"), nullable=False)
-    requiere_refrendo_cgr: Mapped[bool] = mapped_column(Boolean, default=False)
+    requiere_refrendo_cgr: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    
+    # Campos opcionales
     numero_gestion_cobro: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     numero_orden_pago: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     hash_documento_firmado: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
@@ -83,7 +85,7 @@ class Mision(Base, TimestampMixin):
 
     # --- Relationships ---
     estado_flujo: Mapped["EstadoFlujo"] = relationship("EstadoFlujo", back_populates="misiones")
-    usuario_prepara: Mapped[Optional["Usuario"]] = relationship("Usuario", foreign_keys=[id_usuario_prepara]) # back_populates en Usuario
+    usuario_prepara: Mapped[Optional["Usuario"]] = relationship("Usuario", foreign_keys=[id_usuario_prepara])
     
     items_viaticos: Mapped[List["ItemViatico"]] = relationship("ItemViatico", back_populates="mision", cascade="all, delete-orphan")
     items_viaticos_completos: Mapped[List["ItemViaticoCompleto"]] = relationship("ItemViaticoCompleto", back_populates="mision", cascade="all, delete-orphan")
@@ -97,7 +99,14 @@ class Mision(Base, TimestampMixin):
     partidas_presupuestarias: Mapped[List["MisionPartidaPresupuestaria"]] = relationship("MisionPartidaPresupuestaria", back_populates="mision", cascade="all, delete-orphan")
     firmas_electronicas: Mapped[List["FirmaElectronica"]] = relationship("FirmaElectronica", back_populates="mision", cascade="all, delete-orphan")
 
+    # Propiedad computed para compatibilidad (si tienes un campo beneficiario_nombre en algún lugar)
+    @property
+    def beneficiario_nombre(self) -> Optional[str]:
+        """Propiedad computed que puede ser llenada desde RRHH si es necesario"""
+        return None  # Implementar si es necesario
 
+
+# Resto de las clases se mantienen igual...
 class MisionPartidaPresupuestaria(Base):
     __tablename__ = "mision_partidas_presupuestarias"
     
@@ -105,9 +114,12 @@ class MisionPartidaPresupuestaria(Base):
     id_mision: Mapped[int] = mapped_column(Integer, ForeignKey("misiones.id_mision"), nullable=False)
     codigo_partida: Mapped[str] = mapped_column(String(100), nullable=False)
     monto: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
+    descripcion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     mision: Mapped["Mision"] = relationship("Mision", back_populates="partidas_presupuestarias")
 
+
+# ... resto de las clases se mantienen igual
 
 class GestionCobro(Base):
     __tablename__ = "gestiones_cobro"

@@ -1,6 +1,6 @@
 # app/main.py
 
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI, Request, status, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.api.v1 import api_router
@@ -16,6 +16,8 @@ from app.core.exceptions import (
 from app.models.user import Usuario, Rol
 from app.models.mission import *
 from app.models.configuration import ConfiguracionGeneral, ConfiguracionSistema  # ← NUEVO
+from app.api.deps import get_current_user_universal
+from typing import Union, Optional
 
 Base.metadata.create_all(bind=engine_financiero)
 
@@ -108,7 +110,7 @@ async def mission_exception_handler(request: Request, exc: MissionException):
 # Configuración de CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.ALLOWED_ORIGINS,
+    allow_origins=["http://localhost:3000", "http://localhost:8080", "*"],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["*"],

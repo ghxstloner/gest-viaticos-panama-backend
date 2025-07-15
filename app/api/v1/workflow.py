@@ -8,7 +8,7 @@ from sqlalchemy import text
 
 from ...core.database import get_db_financiero, get_db_rrhh
 from ...core.exceptions import WorkflowException, BusinessException, PermissionException
-from ...api.deps import get_current_user, get_current_employee_with_role
+from ...api.deps import get_current_user, get_current_employee_with_role, get_current_user_universal
 from ...models.user import Usuario
 from ...models.mission import EstadoFlujo, TransicionFlujo
 from ...schemas.workflow import *
@@ -38,6 +38,41 @@ def get_client_ip(request: Request) -> str:
         return real_ip
     
     return request.client.host if request.client else "127.0.0.1"
+
+def get_role_name(user: Union[Usuario, dict]) -> str:
+    """Función mejorada para obtener y normalizar el nombre del rol"""
+    if isinstance(user, Usuario):
+        role = (user.rol.nombre_rol or "").strip().lower()
+    else:
+        role = (user.get("role_name", "") or "").strip().lower()
+    
+    # Normalizar roles conocidos para evitar problemas de comparación
+    role_mapping = {
+        "jefe inmediato": "jefe inmediato",
+        "analista tesorería": "analista tesorería",
+        "analista tesoreria": "analista tesorería",  # Sin tilde
+        "analista presupuesto": "analista presupuesto",
+        "analista contabilidad": "analista contabilidad",
+        "director finanzas": "director finanzas",
+        "fiscalizador cgr": "fiscalizador cgr",
+        "custodio caja menuda": "custodio caja menuda",
+        "administrador sistema": "administrador sistema",
+        "solicitante": "solicitante"
+    }
+    
+    return role_mapping.get(role, role)
+
+def is_jefe_inmediato(user: Union[Usuario, dict]) -> bool:
+    """Función para verificar si el usuario es jefe inmediato"""
+    if isinstance(user, dict):
+        # Para empleados, verificar tanto el rol como el flag is_department_head
+        role_name = get_role_name(user)
+        is_department_head = user.get("is_department_head", False)
+        return "jefe" in role_name or is_department_head or role_name == "jefe inmediato"
+    else:
+        # Para usuarios financieros
+        role_name = get_role_name(user)
+        return "jefe" in role_name or role_name == "jefe inmediato"
 
 # ===============================================
 # ENDPOINTS UNIVERSALES (EMPLEADOS Y FINANCIEROS)
@@ -107,7 +142,7 @@ async def jefe_approve_mission(
     Solo disponible para empleados con rol de Jefe Inmediato.
     """
     try:
-        if not current_employee.get("is_department_head"):
+        if not is_jefe_inmediato(current_employee):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Solo los jefes de departamento pueden aprobar solicitudes"
@@ -139,7 +174,7 @@ async def jefe_reject_mission(
     Requiere especificar el motivo del rechazo.
     """
     try:
-        if not current_employee.get("is_department_head"):
+        if not is_jefe_inmediato(current_employee):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Solo los jefes de departamento pueden rechazar solicitudes"
@@ -402,7 +437,6 @@ async def return_mission_for_correction(
 # ===============================================
 # ENDPOINTS PARA OBTENER PENDIENTES POR ROL
 # ===============================================
-
 @router.get("/jefe/pendientes")
 async def get_jefe_pendientes(
     page: int = Query(1, ge=1),
@@ -410,16 +444,33 @@ async def get_jefe_pendientes(
     search: Optional[str] = Query(None),
     tipo_mision: Optional[str] = Query(None),
     workflow_service: WorkflowService = Depends(get_workflow_service),
-    current_employee: dict = Depends(get_current_employee_with_role)
+    user: Union[Usuario, dict] = Depends(get_current_user_universal)
 ):
     """
     Obtiene las solicitudes pendientes de aprobación para jefes inmediatos.
     """
     try:
-        if not current_employee.get("is_department_head"):
+        # Debug logging detallado
+        print(f"DEBUG - Usuario recibido: {user}")
+        print(f"DEBUG - Tipo de usuario: {type(user)}")
+        
+        if isinstance(user, dict):
+            print(f"DEBUG - Todos los datos del user dict: {user}")
+            role_name = user.get('role_name', '')
+            is_department_head = user.get('is_department_head', False)
+            print(f"DEBUG - role_name: '{role_name}'")
+            print(f"DEBUG - is_department_head: {is_department_head}")
+            print(f"DEBUG - id_rol: {user.get('id_rol')}")
+        
+        # Verificar si el usuario es jefe inmediato
+        if not is_jefe_inmediato(user):
+            role_name = get_role_name(user)
+            is_dept_head = user.get("is_department_head", False) if isinstance(user, dict) else False
+            
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Solo los jefes de departamento pueden acceder a esta cola"
+                detail=f"Solo los jefes de departamento pueden acceder a esta cola. "
+                       f"Rol actual: '{role_name}', Es jefe: {is_dept_head}, Datos: {user}"
             )
         
         filters = {
@@ -429,12 +480,17 @@ async def get_jefe_pendientes(
             "tipo_mision": tipo_mision
         }
         
-        return workflow_service.get_pending_missions_by_role("Jefe Inmediato", current_employee, filters)
+        return workflow_service.get_pending_missions_by_role("Jefe Inmediato", user, filters)
         
+    except HTTPException:
+        raise
     except (WorkflowException, PermissionException) as e:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        print(f"DEBUG - Error: {str(e)}")
+        import traceback
+        print(f"DEBUG - Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error interno: {str(e)}")
 
 @router.get("/tesoreria/pendientes")
 async def get_tesoreria_pendientes(
@@ -619,39 +675,39 @@ async def get_budget_items_catalog(
         
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-
+    
+    
 @router.get("/missions/{mission_id}/next-states")
 async def get_next_possible_states(
-    mission_id: int,
-    workflow_service: WorkflowService = Depends(get_workflow_service),
-    current_user: Optional[Usuario] = Depends(get_current_user),
-    current_employee: Optional[dict] = Depends(get_current_employee_with_role)
+   mission_id: int,
+   workflow_service: WorkflowService = Depends(get_workflow_service),
+   current_user: Optional[Usuario] = Depends(get_current_user),
+   current_employee: Optional[dict] = Depends(get_current_employee_with_role)
 ):
-    """
-    Obtiene los posibles próximos estados para una misión específica.
-    """
-    try:
-        user = current_user if current_user else current_employee
-        if not user:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuario no autenticado")
-        
-        actions = workflow_service.get_available_actions(mission_id, user)
-        
-        return {
-            "mission_id": mission_id,
-            "current_state": actions.estado_actual,
-            "next_possible_states": [
-                {
-                    "action": accion["accion"],
-                    "next_state": accion["estado_destino"],
-                    "description": accion["descripcion"]
-                }
-                for accion in actions.acciones_disponibles
-            ]
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+   """
+   Obtiene los posibles próximos estados para una misión específica.
+   """
+   try:
+       user = current_user if current_user else current_employee
+       if not user:
+           raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuario no autenticado")
+       
+       actions = workflow_service.get_available_actions(mission_id, user)
+       return {
+           "mission_id": mission_id,
+           "current_state": actions.estado_actual,
+           "next_possible_states": [
+               {
+                   "action": accion["accion"],
+                   "next_state": accion["estado_destino"],
+                   "description": accion["descripcion"]
+               }
+               for accion in actions.acciones_disponibles
+           ]
+       }
+       
+   except Exception as e:
+       raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 # ===============================================
 # ENDPOINTS DE INFORMACIÓN DEL SISTEMA
@@ -659,31 +715,75 @@ async def get_next_possible_states(
 
 @router.get("/info/workflow-summary")
 async def get_workflow_system_info(
-    current_user: Usuario = Depends(get_current_user),
-    db: Session = Depends(get_db_financiero)
+   current_user: Usuario = Depends(get_current_user),
+   db: Session = Depends(get_db_financiero)
 ):
-    """
-    Obtiene información general del sistema de workflow.
-    Solo disponible para administradores.
-    """
-    try:
-        if current_user.rol.nombre_rol != "Administrador Sistema":
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acceso denegado")
-        
-        # Estadísticas básicas del sistema
-        total_estados = db.query(EstadoFlujo).count()
-        total_transiciones = db.query(TransicionFlujo).filter(TransicionFlujo.es_activa == True).count()
-        
-        return {
-            "total_estados": total_estados,
-            "total_transiciones_activas": total_transiciones,
-            "tipos_flujo_soportados": ["VIATICOS", "CAJA_MENUDA", "AMBOS"],
-            "roles_con_acceso": [
-                "Solicitante", "Jefe Inmediato", "Analista Tesorería",
-                "Analista Presupuesto", "Analista Contabilidad", 
-                "Director Finanzas", "Fiscalizador CGR", "Custodio Caja Menuda"
-            ]
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+   """
+   Obtiene información general del sistema de workflow.
+   Solo disponible para administradores.
+   """
+   try:
+       if current_user.rol.nombre_rol != "Administrador Sistema":
+           raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acceso denegado")
+       
+       # Estadísticas básicas del sistema
+       total_estados = db.query(EstadoFlujo).count()
+       total_transiciones = db.query(TransicionFlujo).filter(TransicionFlujo.es_activa == True).count()
+       
+       return {
+           "total_estados": total_estados,
+           "total_transiciones_activas": total_transiciones,
+           "tipos_flujo_soportados": ["VIATICOS", "CAJA_MENUDA", "AMBOS"],
+           "roles_con_acceso": [
+               "Solicitante", "Jefe Inmediato", "Analista Tesorería",
+               "Analista Presupuesto", "Analista Contabilidad", 
+               "Director Finanzas", "Fiscalizador CGR", "Custodio Caja Menuda"
+           ]
+       }
+       
+   except Exception as e:
+       raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+# ===============================================
+# ENDPOINT ADICIONAL PARA DEBUG
+# ===============================================
+
+@router.get("/debug/user-info")
+async def debug_user_info(
+   current_user: Optional[Usuario] = Depends(get_current_user),
+   current_employee: Optional[dict] = Depends(get_current_employee_with_role)
+):
+   """
+   Endpoint temporal para debug - muestra información del usuario actual.
+   """
+   try:
+       user = current_user if current_user else current_employee
+       
+       if isinstance(user, dict):
+           return {
+               "user_type": "employee",
+               "data": user,
+               "role_name": user.get("role_name"),
+               "is_department_head": user.get("is_department_head"),
+               "processed_role": get_role_name(user),
+               "is_jefe_check": is_jefe_inmediato(user)
+           }
+       elif isinstance(user, Usuario):
+           return {
+               "user_type": "financial_user",
+               "username": user.login_username,
+               "role_name": user.rol.nombre_rol,
+               "processed_role": get_role_name(user),
+               "is_jefe_check": is_jefe_inmediato(user)
+           }
+       else:
+           return {
+               "user_type": "none",
+               "message": "No user authenticated"
+           }
+           
+   except Exception as e:
+       return {
+           "error": str(e),
+           "user_data": str(user) if 'user' in locals() else "No user"
+       }
