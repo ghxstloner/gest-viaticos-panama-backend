@@ -78,3 +78,18 @@ class Usuario(UsuarioBase):
 
 class UsuarioInDB(Usuario):
     password_hash: str
+
+
+class EmpleadoInfo(BaseModel):
+    personal_id: int
+    nombre_completo: str
+    cedula: Optional[str] = None
+    numero_trabajador: Optional[int] = None
+    vicepresidencia: Optional[str] = None
+    departamento: Optional[str] = None
+    jefe_inmediato: Optional[str] = None
+    tipo_trabajador: Optional[str] = None
+    cargo: Optional[str] = None
+    titulo_puesto: Optional[str] = None
+    horario_trabajo: Optional[str] = None
+    turno: Optional[str] = None

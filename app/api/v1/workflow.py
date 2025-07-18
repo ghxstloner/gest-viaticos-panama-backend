@@ -8,9 +8,9 @@ from sqlalchemy import text
 
 from ...core.database import get_db_financiero, get_db_rrhh
 from ...core.exceptions import WorkflowException, BusinessException, PermissionException
-from ...api.deps import get_current_user, get_current_employee_with_role, get_current_user_universal
+from ...api.deps import get_current_user, get_current_employee_with_role, get_current_user_universal, get_current_employee
 from ...models.user import Usuario
-from ...models.mission import EstadoFlujo, TransicionFlujo
+from ...models.mission import EstadoFlujo, TransicionFlujo, HistorialFlujo
 from ...schemas.workflow import *
 from ...services.workflow_service import WorkflowService
 
@@ -676,7 +676,7 @@ async def get_budget_items_catalog(
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
     
-    
+
 @router.get("/missions/{mission_id}/next-states")
 async def get_next_possible_states(
    mission_id: int,
@@ -787,3 +787,195 @@ async def debug_user_info(
            "error": str(e),
            "user_data": str(user) if 'user' in locals() else "No user"
        }
+@router.post("/missions/{mission_id}/jefe/devolver", response_model=WorkflowTransitionResponse)
+async def jefe_return_for_correction(
+    mission_id: int,
+    request_data: JefeReturnRequest,
+    workflow_service: WorkflowService = Depends(get_workflow_service),
+    current_employee: dict = Depends(get_current_employee_with_role),
+    client_ip: str = Depends(get_client_ip),
+    db: Session = Depends(get_db_financiero)
+):
+    """
+    Permite al jefe inmediato devolver una solicitud para corrección.
+    """
+    try:
+        if not is_jefe_inmediato(current_employee):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Solo los jefes de departamento pueden devolver solicitudes"
+            )
+        
+        # Obtener y validar la misión
+        mision = workflow_service._get_mission_with_validation(mission_id, current_employee)
+        workflow_service._validate_employee_supervision(mision, current_employee)
+        
+        estado_anterior = mision.estado_flujo.nombre_estado
+        estado_anterior_id = mision.id_estado_flujo  # ← Usar el ID actual directamente
+        
+        # Cambiar estado directamente
+        mision.id_estado_flujo = 8  # DEVUELTO_CORRECCION
+        
+        # Crear historial
+        historial = HistorialFlujo(
+            id_mision=mision.id_mision,
+            id_usuario_accion=1,  # Usuario sistema para empleados
+            id_estado_anterior=estado_anterior_id,  # ← Usar el ID que ya tenemos
+            id_estado_nuevo=8,
+            tipo_accion="DEVOLVER",
+            comentarios=request_data.comentarios,
+            datos_adicionales={
+                'motivo': request_data.motivo,
+                'observaciones_correccion': getattr(request_data, 'observaciones_correccion', None),
+                'jefe_cedula': current_employee.get('cedula'),
+                'jefe_nombre': current_employee.get('apenom')
+            },
+            ip_usuario=client_ip
+        )
+        
+        db.add(historial)
+        db.commit()
+        
+        return WorkflowTransitionResponse(
+            success=True,
+            message=f'Solicitud devuelta para corrección por {current_employee.get("apenom", "Jefe Inmediato")}',
+            mission_id=mission_id,
+            estado_anterior=estado_anterior,
+            estado_nuevo="DEVUELTO_CORRECCION",
+            accion_ejecutada="DEVOLVER",
+            requiere_accion_adicional=True,
+            datos_transicion={
+                'motivo': request_data.motivo,
+                'observaciones_correccion': getattr(request_data, 'observaciones_correccion', None)
+            }
+        )
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+@router.post("/missions/{mission_id}/jefe/aprobar-directo", response_model=WorkflowTransitionResponse)
+async def jefe_approve_direct_payment(
+    mission_id: int,
+    request_data: JefeDirectApprovalRequest,
+    workflow_service: WorkflowService = Depends(get_workflow_service),
+    current_employee: dict = Depends(get_current_employee_with_role),
+    client_ip: str = Depends(get_client_ip),
+    db: Session = Depends(get_db_financiero)
+):
+    """
+    Permite al jefe inmediato aprobar directamente para pago.
+    """
+    try:
+        if not is_jefe_inmediato(current_employee):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Solo los jefes de departamento pueden aprobar solicitudes"
+            )
+        
+        # Obtener y validar la misión
+        mision = workflow_service._get_mission_with_validation(mission_id, current_employee)
+        workflow_service._validate_employee_supervision(mision, current_employee)
+        
+        estado_anterior = mision.estado_flujo.nombre_estado
+        estado_anterior_id = mision.id_estado_flujo  # ← Usar el ID actual directamente
+        
+        # Actualizar monto si se especifica
+        if hasattr(request_data, 'monto_aprobado') and request_data.monto_aprobado:
+            mision.monto_aprobado = request_data.monto_aprobado
+        else:
+            mision.monto_aprobado = mision.monto_total_calculado
+        
+        # Cambiar estado directamente
+        mision.id_estado_flujo = 6  # APROBADO_PARA_PAGO
+        
+        # Crear historial
+        historial = HistorialFlujo(
+            id_mision=mision.id_mision,
+            id_usuario_accion=1,  # Usuario sistema para empleados
+            id_estado_anterior=estado_anterior_id,  # ← Usar el ID que ya tenemos
+            id_estado_nuevo=6,
+            tipo_accion="APROBAR_DIRECTO",
+            comentarios=request_data.comentarios,
+            datos_adicionales={
+                'justificacion': getattr(request_data, 'justificacion', 'Aprobación directa'),
+                'es_emergencia': getattr(request_data, 'es_emergencia', False),
+                'monto_aprobado': float(mision.monto_aprobado),
+                'jefe_cedula': current_employee.get('cedula'),
+                'jefe_nombre': current_employee.get('apenom')
+            },
+            ip_usuario=client_ip
+        )
+        
+        db.add(historial)
+        db.commit()
+        
+        return WorkflowTransitionResponse(
+            success=True,
+            message=f'Solicitud aprobada directamente para pago por {current_employee.get("apenom", "Jefe Inmediato")}',
+            mission_id=mission_id,
+            estado_anterior=estado_anterior,
+            estado_nuevo="APROBADO_PARA_PAGO",
+            accion_ejecutada="APROBAR_DIRECTO",
+            requiere_accion_adicional=False,
+            datos_transicion={
+                'justificacion': getattr(request_data, 'justificacion', 'Aprobación directa'),
+                'monto_aprobado': float(mision.monto_aprobado)
+            }
+        )
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@router.get("/custodio/pendientes")
+async def get_custodio_pendientes(
+    request: Request,
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
+    search: Optional[str] = Query(None),
+    tipo_mision: Optional[str] = Query(None),
+    workflow_service: WorkflowService = Depends(get_workflow_service),
+    current_user: Usuario = Depends(get_current_user),
+):
+    """
+    Obtiene las solicitudes de CAJA MENUDA pendientes de pago para Custodio Caja Menuda.
+    """
+    try:
+        # 🔍 DEBUG - Ver el rol exacto
+        print(f"🔍 ROL EXACTO: '{current_user.rol.nombre_rol}'")
+        print(f"🔍 LONGITUD: {len(current_user.rol.nombre_rol)}")
+        print(f"🔍 USUARIO: {current_user.login_username}")
+        
+        # ✅ SOLUCIÓN: Usar .strip() y comparación flexible
+        rol_usuario = current_user.rol.nombre_rol.strip()
+        
+        if rol_usuario != "Custodio Caja Menuda":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, 
+                detail=f"Acceso denegado - Rol actual: '{rol_usuario}', se requiere 'Custodio Caja Menuda'"
+            )
+        
+        filters = {
+            "page": page,
+            "size": size,
+            "search": search,
+            "tipo_mision": tipo_mision
+        }
+        
+        result = workflow_service.get_pending_missions_by_role("Custodio Caja Menuda", current_user, filters)
+        
+        print(f"🔍 Resultado obtenido: {len(result.get('items', []))} misiones")
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"🔍 Error: {str(e)}")
+        import traceback
+        print(f"🔍 Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+# Agregar estos endpoints al final del archivo employee_missions.py
+

@@ -231,3 +231,12 @@ class PartidaPresupuestariaResponse(BaseModel):
     codigo_partida: str
     descripcion: str
     es_activa: bool
+
+class JefeReturnRequest(WorkflowActionBase):
+    motivo: str = Field(..., min_length=10, max_length=500, description="Motivo por el cual se devuelve para corrección")
+    observaciones_correccion: Optional[str] = Field(None, max_length=1000, description="Observaciones específicas sobre qué corregir")
+
+class JefeDirectApprovalRequest(WorkflowActionBase):
+    justificacion: str = Field(..., min_length=10, max_length=500, description="Justificación para aprobación directa")
+    es_emergencia: bool = Field(default=False, description="Indica si es una situación de emergencia")
+    monto_aprobado: Optional[Decimal] = Field(None, description="Monto específico aprobado por el jefe")

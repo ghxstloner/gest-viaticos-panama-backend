@@ -19,31 +19,51 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_STR}/auth/login
 
 def get_current_user(
     db: Session = Depends(get_db_financiero),
-    token: str = Depends(oauth2_scheme)
+    credentials: HTTPAuthorizationCredentials = Depends(security)  # ← CAMBIO AQUÍ
 ) -> Usuario:
     """
     Obtiene el usuario actual (del sistema financiero) a partir del token JWT.
     """
+    print("🚨 GET_CURRENT_USER EJECUTÁNDOSE")
+    
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="No se pudieron validar las credenciales",
         headers={"WWW-Authenticate": "Bearer"},
     )
     
+    if not credentials:  # ← AGREGAR validación
+        raise credentials_exception
+    
     try:
-        payload = decode_access_token(token)
+        # ← CAMBIO: usar credentials.credentials
+        payload = jwt.decode(
+            credentials.credentials,  # ← CAMBIO AQUÍ
+            settings.SECRET_KEY, 
+            algorithms=[settings.ALGORITHM]
+        )
+        
         username: str = payload.get("sub")
         token_type: str = payload.get("type", "")
+        
+        print(f"🚨 Username: {username}, Type: {token_type}")
         
         if username is None or token_type != "financiero":
             raise credentials_exception
             
-    except ValueError:
+    except JWTError as e:  # ← CAMBIO: capturar JWTError
+        print(f"🚨 JWTError: {e}")
+        raise credentials_exception
+    except Exception as e:
+        print(f"🚨 Error: {e}")
         raise credentials_exception
         
     user = db.query(Usuario).filter(Usuario.login_username == username).first()
+    
     if user is None:
         raise credentials_exception
+        
+    print(f"🚨 ÉXITO: {user.login_username} - {user.rol.nombre_rol}")
     return user
 
 def get_current_employee(

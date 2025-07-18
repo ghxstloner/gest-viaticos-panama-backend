@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db_financiero
-from app.schemas.user import Usuario, UsuarioCreate, UsuarioUpdate, Rol, RolCreate, RolUpdate, Permiso
+from app.schemas.user import Usuario, UsuarioCreate, UsuarioUpdate, Rol, RolCreate, RolUpdate, Permiso, EmpleadoInfo
 from app.services.user import UserService
 from app.api.deps import get_current_user, get_current_user_universal
 from app.models.user import Usuario as UsuarioModel
@@ -252,3 +252,22 @@ async def get_all_permisos(
     """Get ALL available permissions (for admin use)"""
     user_service = UserService(db)
     return user_service.get_all_permisos()
+
+# Agregar este endpoint a tu router
+@router.get("/empleado/{personal_id}", response_model=EmpleadoInfo)
+async def get_employee_info(
+    personal_id: int,
+    db: Session = Depends(get_db_financiero),
+    current_user: UsuarioModel = Depends(get_current_user_universal)
+):
+    """Get complete employee information from RRHH system"""
+    user_service = UserService(db)
+    employee_info = user_service.get_employee_complete_info(personal_id)
+    
+    if not employee_info:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Employee not found"
+        )
+    
+    return employee_info

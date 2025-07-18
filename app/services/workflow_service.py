@@ -452,43 +452,80 @@ class WorkflowService:
         user: Usuario
     ) -> Dict[str, Any]:
         """Procesa el pago de la misión"""
+
+        # ✅ SOLUCIÓN: No modificar la transición, solo determinar el estado final
+        estado_destino_final = None
+
         # Determinar el próximo estado basado en el método de pago
         if request_data.metodo_pago == 'EFECTIVO':
             # Para efectivo, ir directo a PAGADO
             estado_pagado = self._states_cache.get('PAGADO')
             if estado_pagado:
-                transicion.id_estado_destino = estado_pagado.id_estado_flujo
+                estado_destino_final = estado_pagado.id_estado_flujo
         else:
             # Para transferencias/ACH, ir a PENDIENTE_FIRMA_ELECTRONICA
             estado_firma = self._states_cache.get('PENDIENTE_FIRMA_ELECTRONICA')
             if estado_firma:
-                transicion.id_estado_destino = estado_firma.id_estado_flujo
-        
-        # Actualizar monto pagado
+                estado_destino_final = estado_firma.id_estado_flujo
+
+        # Si no se pudo determinar el estado, usar el de la transición original
+        if estado_destino_final is None:
+            estado_destino_final = transicion.id_estado_destino
+
+        # Actualizar la misión directamente con el estado final
+        estado_anterior_id = mision.id_estado_flujo
+        mision.id_estado_flujo = estado_destino_final
+
+        # Actualizar datos de pago en la misión
         mision.monto_pagado = mision.monto_aprobado
         mision.fecha_pago = request_data.fecha_pago or datetime.now()
-        
+
+        # Crear historial manualmente con los estados correctos
+        user_id = user.id_usuario if isinstance(user, Usuario) else 1
+
+        historial = HistorialFlujo(
+            id_mision=mision.id_mision,
+            id_usuario_accion=user_id,
+            id_estado_anterior=estado_anterior_id,
+            id_estado_nuevo=estado_destino_final,
+            tipo_accion="APROBAR",
+            comentarios=request_data.comentarios,
+            datos_adicionales={
+                'procesado_por': user.login_username,
+                'metodo_pago': request_data.metodo_pago,
+                'monto_pagado': float(mision.monto_pagado),
+                'numero_transaccion': getattr(request_data, 'numero_transaccion', None),
+                'banco_origen': getattr(request_data, 'banco_origen', None),
+                'fecha_pago': mision.fecha_pago.isoformat() if mision.fecha_pago else None
+            },
+            ip_usuario=None  # Se pasará desde el endpoint
+        )
+
+        self.db.add(historial)
+
+        # Preparar datos adicionales para respuesta
         datos_adicionales = {
             'procesado_por': user.login_username,
             'metodo_pago': request_data.metodo_pago,
             'monto_pagado': float(mision.monto_pagado)
         }
-        
+
         if hasattr(request_data, 'numero_transaccion') and request_data.numero_transaccion:
             datos_adicionales['numero_transaccion'] = request_data.numero_transaccion
-        
+
         if hasattr(request_data, 'banco_origen') and request_data.banco_origen:
             datos_adicionales['banco_origen'] = request_data.banco_origen
-        
+
         if mision.fecha_pago:
             datos_adicionales['fecha_pago'] = mision.fecha_pago.isoformat()
-        
+
+        # Mensaje según el método de pago
         mensaje = f'Pago procesado exitosamente vía {request_data.metodo_pago}'
         if request_data.metodo_pago == 'EFECTIVO':
             mensaje += ' - Pago completado'
         else:
             mensaje += ' - Pendiente firma electrónica'
-        
+
         return {
             'message': mensaje,
             'datos_adicionales': datos_adicionales
@@ -590,115 +627,122 @@ class WorkflowService:
            ))
        
         return estados_info
+    
     def get_pending_missions_by_role(
-       self, 
-       role_name: str, 
-       user: Union[Usuario, dict], 
-       filters: Dict[str, Any]
-   ) -> Dict[str, Any]:
-       """
-       Obtiene las misiones pendientes según el rol específico.
-       """
-       # Mapeo de roles a estados de workflow
-       role_state_mapping = {
-           'Jefe Inmediato': ['PENDIENTE_JEFE'],
-           'Analista Tesorería': ['PENDIENTE_REVISION_TESORERIA', 'APROBADO_PARA_PAGO', 'PENDIENTE_FIRMA_ELECTRONICA'],
-           'Analista Presupuesto': ['PENDIENTE_ASIGNACION_PRESUPUESTO'],
-           'Analista Contabilidad': ['PENDIENTE_CONTABILIDAD'],
-           'Director Finanzas': ['PENDIENTE_APROBACION_FINANZAS'],
-           'Fiscalizador CGR': ['PENDIENTE_REFRENDO_CGR'],
-           'Custodio Caja Menuda': ['APROBADO_PARA_PAGO']
-       }
+        self, 
+        role_name: str, 
+        user: Union[Usuario, dict], 
+        filters: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Obtiene las misiones pendientes según el rol específico.
+        """
+        # Mapeo de roles a estados de workflow
+        role_state_mapping = {
+            'Jefe Inmediato': ['PENDIENTE_JEFE'],
+            'Analista Tesorería': ['PENDIENTE_REVISION_TESORERIA', 'APROBADO_PARA_PAGO', 'PENDIENTE_FIRMA_ELECTRONICA'],
+            'Analista Presupuesto': ['PENDIENTE_ASIGNACION_PRESUPUESTO'],
+            'Analista Contabilidad': ['PENDIENTE_CONTABILIDAD'],
+            'Director Finanzas': ['PENDIENTE_APROBACION_FINANZAS'],
+            'Fiscalizador CGR': ['PENDIENTE_REFRENDO_CGR'],
+            'Custodio Caja Menuda': ['APROBADO_PARA_PAGO']
+        }
+        
+        # Obtener estados relevantes para el rol
+        target_states = role_state_mapping.get(role_name, [])
+        if not target_states:
+            raise WorkflowException(f"No hay estados definidos para el rol {role_name}")
+        
+        # Debug logging
+        print(f"DEBUG WorkflowService - role_name: {role_name}")
+        print(f"DEBUG WorkflowService - target_states: {target_states}")
+        print(f"DEBUG WorkflowService - user type: {type(user)}")
+        
+        # Construir query base
+        query = self.db.query(Mision).options(
+            joinedload(Mision.estado_flujo)
+        ).join(EstadoFlujo, Mision.id_estado_flujo == EstadoFlujo.id_estado_flujo).filter(
+            EstadoFlujo.nombre_estado.in_(target_states)
+        )
+        
+        # Aplicar filtros específicos por rol
+        if role_name == 'Jefe Inmediato' and isinstance(user, dict):
+            # Para jefes, solo mostrar solicitudes de sus subordinados
+            query = self._apply_supervisor_filter(query, user)
+        elif role_name == 'Analista Tesorería':
+            # Para tesorería, mostrar según el estado actual
+            pass  # Ya filtrado por target_states
+        elif role_name == 'Custodio Caja Menuda':
+            # Solo mostrar solicitudes de caja menuda listas para pago
+            query = query.filter(
+                and_(
+                    EstadoFlujo.nombre_estado == 'APROBADO_PARA_PAGO',
+                    Mision.tipo_mision == TipoMision.CAJA_MENUDA
+                )
+            )
+        
+        # Aplicar filtros generales
+        if filters.get('search'):
+            search_term = f"%{filters['search']}%"
+            query = query.filter(
+                or_(
+                    Mision.objetivo_mision.ilike(search_term),
+                    Mision.destino_mision.ilike(search_term)
+                )
+            )
+        
+        if filters.get('tipo_mision'):
+            # Convertir string a enum si es necesario
+            tipo_enum = TipoMision(filters['tipo_mision']) if isinstance(filters['tipo_mision'], str) else filters['tipo_mision']
+            query = query.filter(Mision.tipo_mision == tipo_enum)
+        
+        if filters.get('fecha_desde'):
+            query = query.filter(Mision.created_at >= filters['fecha_desde'])
+        
+        if filters.get('fecha_hasta'):
+            query = query.filter(Mision.created_at <= filters['fecha_hasta'])
+        
+        if filters.get('monto_min'):
+            query = query.filter(Mision.monto_total_calculado >= filters['monto_min'])
        
-       # Obtener estados relevantes para el rol
-       target_states = role_state_mapping.get(role_name, [])
-       if not target_states:
-           raise WorkflowException(f"No hay estados definidos para el rol {role_name}")
-       
-       # Debug logging
-       print(f"DEBUG WorkflowService - role_name: {role_name}")
-       print(f"DEBUG WorkflowService - target_states: {target_states}")
-       print(f"DEBUG WorkflowService - user type: {type(user)}")
-       
-       # Construir query base - SIMPLIFICADO
-       query = self.db.query(Mision).options(
-           joinedload(Mision.estado_flujo)
-       ).join(EstadoFlujo, Mision.id_estado_flujo == EstadoFlujo.id_estado_flujo).filter(
-           EstadoFlujo.nombre_estado.in_(target_states)
-       )
-       
-       # Aplicar filtros específicos por rol
-       if role_name == 'Jefe Inmediato' and isinstance(user, dict):
-           # Para jefes, solo mostrar solicitudes de sus subordinados
-           query = self._apply_supervisor_filter(query, user)
-       elif role_name == 'Analista Tesorería':
-           # Para tesorería, mostrar según el estado actual
-           pass  # Ya filtrado por target_states
-       elif role_name == 'Custodio Caja Menuda':
-           # Solo mostrar solicitudes de caja menuda listas para pago
-           query = query.filter(
-               and_(
-                   EstadoFlujo.nombre_estado == 'APROBADO_PARA_PAGO',
-                   Mision.tipo_mision == TipoMision.CAJA_MENUDA  # Usar el enum
-               )
-           )
-       
-       # Aplicar filtros generales
-       if filters.get('search'):
-           search_term = f"%{filters['search']}%"
-           query = query.filter(
-               or_(
-                   Mision.objetivo_mision.ilike(search_term),
-                   Mision.destino_mision.ilike(search_term)
-                   # Remover beneficiario_nombre por ahora
-               )
-           )
-       
-       if filters.get('tipo_mision'):
-           # Convertir string a enum si es necesario
-           tipo_enum = TipoMision(filters['tipo_mision']) if isinstance(filters['tipo_mision'], str) else filters['tipo_mision']
-           query = query.filter(Mision.tipo_mision == tipo_enum)
-       
-       if filters.get('fecha_desde'):
-           query = query.filter(Mision.created_at >= filters['fecha_desde'])
-       
-       if filters.get('fecha_hasta'):
-           query = query.filter(Mision.created_at <= filters['fecha_hasta'])
-       
-       if filters.get('monto_min'):
-           query = query.filter(Mision.monto_total_calculado >= filters['monto_min'])
-       
-       if filters.get('monto_max'):
-           query = query.filter(Mision.monto_total_calculado <= filters['monto_max'])
+        if filters.get('monto_max'):
+            query = query.filter(Mision.monto_total_calculado <= filters['monto_max'])
        
        # Ordenar por fecha de creación (más antiguos primero para priorizar)
-       query = query.order_by(Mision.created_at.asc())
+        query = query.order_by(Mision.created_at.asc())
        
        # Obtener total para paginación
-       total_count = query.count()
+        total_count = query.count()
        
        # Aplicar paginación
-       page = filters.get('page', 1)
-       size = filters.get('size', 20)
-       offset = (page - 1) * size
+        page = filters.get('page', 1)
+        size = filters.get('size', 20)
+        offset = (page - 1) * size
        
-       missions = query.offset(offset).limit(size).all()
+        missions = query.offset(offset).limit(size).all()
        
        # Calcular estadísticas básicas simplificadas
-       total_query = self.db.query(Mision).join(
+        total_query = self.db.query(Mision).join(
            EstadoFlujo, Mision.id_estado_flujo == EstadoFlujo.id_estado_flujo
        ).filter(EstadoFlujo.nombre_estado.in_(target_states))
        
-       if role_name == 'Jefe Inmediato' and isinstance(user, dict):
+        if role_name == 'Jefe Inmediato' and isinstance(user, dict):
            total_query = self._apply_supervisor_filter(total_query, user)
+        elif role_name == 'Custodio Caja Menuda':
+           total_query = total_query.filter(
+               and_(
+                   EstadoFlujo.nombre_estado == 'APROBADO_PARA_PAGO',
+                   Mision.tipo_mision == TipoMision.CAJA_MENUDA
+               )
+           )
        
-       stats = {
+        stats = {
            'total_pendientes': total_query.count(),
            'urgentes': 0,  # Simplificado por ahora
            'antiguos': 0   # Simplificado por ahora
        }
        
-       return {
+        return {
            'items': missions,
            'total': total_count,
            'page': page,
@@ -706,7 +750,6 @@ class WorkflowService:
            'total_pages': (total_count + size - 1) // size,
            'stats': stats
        }
-   
     def _apply_supervisor_filter(self, query, jefe: dict):
        """
        Aplica filtro para que los jefes solo vean solicitudes de sus subordinados.
@@ -903,3 +946,251 @@ class WorkflowService:
        )
        
        self.db.add(historial)
+   
+   # ===============================================
+   # MÉTODOS ADICIONALES PARA CASOS ESPECIALES
+   # ===============================================
+   
+    def execute_workflow_action_with_target_state(
+       self, 
+       mission_id: int, 
+       action: str, 
+       target_state_id: int,
+       user: Union[Usuario, dict],
+       request_data: WorkflowActionBase,
+       client_ip: Optional[str] = None
+   ) -> WorkflowTransitionResponse:
+       """
+       Ejecuta una acción específica del workflow con un estado destino forzado.
+       """
+       mision = self._get_mission_with_validation(mission_id, user)
+       estado_anterior = mision.estado_flujo.nombre_estado
+       
+       try:
+           # Procesar según la acción
+           if action == "DEVOLVER":
+               resultado = self._process_jefe_return_for_correction(mision, request_data, user)
+           elif action == "APROBAR_DIRECTO":
+               resultado = self._process_jefe_direct_approval(mision, request_data, user)
+           else:
+               resultado = {
+                   'message': f'Acción {action} ejecutada exitosamente',
+                   'datos_adicionales': {}
+               }
+           
+           # Cambiar al estado específico
+           mision.id_estado_flujo = target_state_id
+           
+           # Crear historial
+           self._create_manual_history_record(
+               mision, 
+               mision.id_estado_flujo,
+               target_state_id, 
+               action, 
+               request_data, 
+               user, 
+               client_ip
+           )
+           
+           # Obtener nombre del estado destino
+           target_state = self.db.query(EstadoFlujo).filter(
+               EstadoFlujo.id_estado_flujo == target_state_id
+           ).first()
+           
+           self.db.commit()
+           
+           return WorkflowTransitionResponse(
+               success=True,
+               message=resultado.get('message', f'Acción {action} ejecutada exitosamente'),
+               mission_id=mission_id,
+               estado_anterior=estado_anterior,
+               estado_nuevo=target_state.nombre_estado if target_state else "DESCONOCIDO",
+               accion_ejecutada=action,
+               requiere_accion_adicional=resultado.get('requiere_accion_adicional', False),
+               datos_transicion=resultado.get('datos_adicionales')
+           )
+           
+       except Exception as e:
+           self.db.rollback()
+           raise WorkflowException(f"Error ejecutando acción {action}: {str(e)}")
+   
+    def _process_jefe_return_for_correction(
+       self, 
+       mision: Mision, 
+       request_data,
+       user: dict
+   ) -> Dict[str, Any]:
+       """Procesa devolución para corrección por parte del jefe"""
+       self._validate_employee_supervision(mision, user)
+       
+       motivo = getattr(request_data, 'motivo', 'Sin motivo especificado')
+       observaciones = getattr(request_data, 'observaciones_correccion', None)
+       
+       return {
+           'message': f'Solicitud devuelta para corrección por {user.get("apenom", "Jefe Inmediato")}',
+           'requiere_accion_adicional': True,
+           'datos_adicionales': {
+               'motivo': motivo,
+               'observaciones_correccion': observaciones,
+               'jefe_cedula': user.get('cedula'),
+               'jefe_nombre': user.get('apenom'),
+               'accion_requerida': 'CORREGIR_SOLICITUD'
+           }
+       }
+   
+    def _process_jefe_direct_approval(
+       self, 
+       mision: Mision, 
+       request_data,
+       user: dict
+   ) -> Dict[str, Any]:
+       """Procesa aprobación directa para pago por parte del jefe"""
+       self._validate_employee_supervision(mision, user)
+       
+       monto_aprobado = getattr(request_data, 'monto_aprobado', None)
+       if monto_aprobado:
+           mision.monto_aprobado = monto_aprobado
+       else:
+           mision.monto_aprobado = mision.monto_total_calculado
+       
+       justificacion = getattr(request_data, 'justificacion', 'Aprobación directa por jefe inmediato')
+       es_emergencia = getattr(request_data, 'es_emergencia', False)
+       
+       return {
+           'message': f'Solicitud aprobada directamente para pago por {user.get("apenom", "Jefe Inmediato")}',
+           'datos_adicionales': {
+               'justificacion': justificacion,
+               'es_emergencia': es_emergencia,
+               'monto_aprobado': float(mision.monto_aprobado),
+               'jefe_cedula': user.get('cedula'),
+               'jefe_nombre': user.get('apenom'),
+               'flujo_simplificado': True
+           }
+       }
+   
+    def _create_manual_history_record(
+       self, 
+       mision: Mision, 
+       estado_anterior_id: int,
+       estado_nuevo_id: int,
+       accion: str,
+       request_data,
+       user: Union[Usuario, dict],
+       client_ip: Optional[str]
+   ):
+       """Crea un registro manual en el historial"""
+       user_id = user.id_usuario if isinstance(user, Usuario) else 1
+       
+       historial = HistorialFlujo(
+           id_mision=mision.id_mision,
+           id_usuario_accion=user_id,
+           id_estado_anterior=estado_anterior_id,
+           id_estado_nuevo=estado_nuevo_id,
+           tipo_accion=accion,
+           comentarios=getattr(request_data, 'comentarios', None),
+           datos_adicionales=getattr(request_data, 'datos_adicionales', None),
+           ip_usuario=client_ip
+       )
+       
+       self.db.add(historial)
+   
+    def get_employee_missions(
+       self, 
+       employee: dict, 
+       filters: Dict[str, Any]
+   ) -> Dict[str, Any]:
+       """
+       Obtiene las misiones del empleado (solicitudes propias).
+       """
+       if not self.db_rrhh:
+           raise BusinessException("No hay conexión con RRHH para obtener datos del empleado")
+       
+       # Obtener personal_id del empleado
+       cedula = employee.get('cedula')
+       result = self.db_rrhh.execute(text("""
+           SELECT personal_id FROM aitsa_rrhh.nompersonal 
+           WHERE cedula = :cedula
+       """), {"cedula": cedula})
+       
+       employee_info = result.fetchone()
+       if not employee_info:
+           raise BusinessException("No se encontró información del empleado")
+       
+       personal_id = employee_info.personal_id
+       
+       # Construir query para las misiones del empleado
+       query = self.db.query(Mision).options(
+           joinedload(Mision.estado_flujo)
+       ).filter(Mision.beneficiario_personal_id == personal_id)
+       
+       # Aplicar filtros
+       if filters.get('search'):
+           search_term = f"%{filters['search']}%"
+           query = query.filter(
+               or_(
+                   Mision.objetivo_mision.ilike(search_term),
+                   Mision.destino_mision.ilike(search_term),
+                   Mision.numero_solicitud.ilike(search_term)
+               )
+           )
+       
+       if filters.get('estado'):
+           query = query.join(EstadoFlujo).filter(
+               EstadoFlujo.nombre_estado == filters['estado']
+           )
+       
+       if filters.get('tipo_mision'):
+           tipo_enum = TipoMision(filters['tipo_mision']) if isinstance(filters['tipo_mision'], str) else filters['tipo_mision']
+           query = query.filter(Mision.tipo_mision == tipo_enum)
+       
+       # Ordenar por fecha de creación (más recientes primero)
+       query = query.order_by(Mision.created_at.desc())
+       
+       # Obtener total para paginación
+       total_count = query.count()
+       
+       # Aplicar paginación
+       page = filters.get('page', 1)
+       size = filters.get('size', 20)
+       offset = (page - 1) * size
+       
+       missions = query.offset(offset).limit(size).all()
+       
+       return {
+           'items': missions,
+           'total': total_count,
+           'page': page,
+           'size': size,
+           'total_pages': (total_count + size - 1) // size,
+           'employee_info': {
+               'cedula': cedula,
+               'nombre': employee.get('apenom'),
+               'personal_id': personal_id
+           }
+       }
+
+    def _create_history_record_with_states(
+        self, 
+        mision: Mision, 
+        estado_anterior_id: int,
+        estado_nuevo_id: int,
+        tipo_accion,
+        request_data: WorkflowActionBase,
+        user: Union[Usuario, dict],
+        client_ip: Optional[str]
+    ):
+        """Crea un registro en el historial con estados específicos"""
+        user_id = user.id_usuario if isinstance(user, Usuario) else 1
+        
+        historial = HistorialFlujo(
+            id_mision=mision.id_mision,
+            id_usuario_accion=user_id,
+            id_estado_anterior=estado_anterior_id,
+            id_estado_nuevo=estado_nuevo_id,
+            tipo_accion=tipo_accion,
+            comentarios=request_data.comentarios,
+            datos_adicionales=request_data.datos_adicionales,
+            ip_usuario=client_ip
+        )
+        
+        self.db.add(historial)

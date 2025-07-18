@@ -1,3 +1,5 @@
+# app/schemas/mission.py
+
 from pydantic import BaseModel, ConfigDict, Field, validator, root_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime, date
@@ -54,6 +56,53 @@ class ItemTransporte(ItemTransporteBase):
     id_item_transporte: int
     id_mision: int
     model_config = ConfigDict(from_attributes=True)
+
+
+# --- Esquemas específicos para empleados (reutilizables) ---
+class ViaticoCompletoEmployee(BaseModel):
+    cantidadDias: int = Field(..., gt=0)
+    pagoPorDia: Decimal = Field(..., gt=0)
+
+class ViaticoParcialEmployee(BaseModel):
+    fecha: date
+    desayuno: str  # 'SI' o 'NO'
+    almuerzo: str  # 'SI' o 'NO'
+    cena: str      # 'SI' o 'NO'
+    hospedaje: str # 'SI' o 'NO'
+    observaciones: Optional[str] = None
+
+class TransporteDetalleEmployee(BaseModel):
+    fecha: date
+    tipo: str  # 'AÉREO', 'ACUÁTICO', 'MARÍTIMO', 'TERRESTRE'
+    origen: str = Field(..., min_length=1)
+    destino: str = Field(..., min_length=1)
+    monto: Decimal = Field(..., gt=0)
+
+class MisionExteriorEmployee(BaseModel):
+    destino: str = Field(..., min_length=1)
+    region: str = Field(..., min_length=1)
+    fechaSalida: date
+    fechaRetorno: date
+    porcentaje: Decimal = Field(default=Decimal("100"), ge=0, le=100)
+
+class CajaMenudaViaticoEmployee(BaseModel):
+    fecha: date
+    horaDe: str = Field(..., pattern=r'^([01]?[0-9]|2[0-3]):[0-5][0-9]$')
+    horaHasta: str = Field(..., pattern=r'^([01]?[0-9]|2[0-3]):[0-5][0-9]$')
+    desayuno: Decimal = Field(default=Decimal("0"), ge=0)
+    almuerzo: Decimal = Field(default=Decimal("0"), ge=0)
+    cena: Decimal = Field(default=Decimal("0"), ge=0)
+    transporte: Decimal = Field(default=Decimal("0"), ge=0)
+
+    @validator('horaHasta')
+    def validate_time_range(cls, v, values):
+        if 'horaDe' in values:
+            from datetime import datetime
+            hora_de = datetime.strptime(values['horaDe'], '%H:%M')
+            hora_hasta = datetime.strptime(v, '%H:%M')
+            if hora_hasta <= hora_de:
+                raise ValueError('La hora hasta debe ser mayor que la hora desde')
+        return v
 
 
 # --- Esquemas Principales de Misión ---
@@ -114,6 +163,62 @@ class MisionUpdate(BaseModel):
     items_viaticos: Optional[List[ItemViaticoCreate]] = None
     items_transporte: Optional[List[ItemTransporteCreate]] = None
     partidas_presupuestarias: Optional[List[MisionPartidaPresupuestariaCreate]] = None
+
+
+# --- Esquemas de actualización específicos para empleados ---
+class TravelExpensesUpdateRequest(BaseModel):
+    objetivo: Optional[str] = Field(None, min_length=10, max_length=1000)
+    destino: Optional[str] = Field(None, min_length=1, max_length=255)
+    transporteOficial: Optional[str] = None  # 'SI' o 'NO'
+    fechaSalida: Optional[date] = None
+    horaSalida: Optional[str] = Field(None, pattern=r'^([01]?[0-9]|2[0-3]):[0-5][0-9]$')
+    fechaRetorno: Optional[date] = None
+    horaRetorno: Optional[str] = Field(None, pattern=r'^([01]?[0-9]|2[0-3]):[0-5][0-9]$')
+    categoria: Optional[str] = Field(None, pattern=r'^(TITULAR|OTROS SERVIDORES PÚBLICOS|OTRAS PERSONAS)$')
+    viaticosCompletos: Optional[List[ViaticoCompletoEmployee]] = None
+    viaticosParciales: Optional[List[ViaticoParcialEmployee]] = None
+    transporteDetalle: Optional[List[TransporteDetalleEmployee]] = None
+    misionesExterior: Optional[List[MisionExteriorEmployee]] = None
+
+    @validator('fechaRetorno')
+    def validate_return_date(cls, v, values):
+        if 'fechaSalida' in values and v and values['fechaSalida'] and v < values['fechaSalida']:
+            raise ValueError('La fecha de retorno debe ser igual o posterior a la fecha de salida')
+        return v
+
+class PettyCashUpdateRequest(BaseModel):
+    trabajo_a_realizar: Optional[str] = Field(None, min_length=10, max_length=500)
+    para: Optional[str] = None  # departamento
+    vicepresidencia: Optional[str] = None
+    viaticosCompletos: Optional[List[CajaMenudaViaticoEmployee]] = None
+
+
+# --- Esquemas de creación para empleados ---
+class TravelExpensesCreateRequest(BaseModel):
+    objetivo: str = Field(..., min_length=10, max_length=1000)
+    destino: str = Field(..., min_length=1, max_length=255)
+    transporteOficial: str  # 'SI' o 'NO'
+    fechaSalida: date
+    horaSalida: str = Field(..., pattern=r'^([01]?[0-9]|2[0-3]):[0-5][0-9]$')
+    fechaRetorno: date
+    horaRetorno: str = Field(..., pattern=r'^([01]?[0-9]|2[0-3]):[0-5][0-9]$')
+    categoria: str = Field(..., pattern=r'^(TITULAR|OTROS SERVIDORES PÚBLICOS|OTRAS PERSONAS)$')
+    viaticosCompletos: List[ViaticoCompletoEmployee] = []
+    viaticosParciales: List[ViaticoParcialEmployee] = []
+    transporteDetalle: List[TransporteDetalleEmployee] = []
+    misionesExterior: List[MisionExteriorEmployee] = []
+
+    @validator('fechaRetorno')
+    def validate_return_date(cls, v, values):
+        if 'fechaSalida' in values and v < values['fechaSalida']:
+            raise ValueError('La fecha de retorno debe ser igual o posterior a la fecha de salida')
+        return v
+
+class PettyCashCreateRequest(BaseModel):
+    trabajo_a_realizar: str = Field(..., min_length=10, max_length=500)
+    para: str = Field(..., min_length=1)  # departamento
+    vicepresidencia: str = Field(..., min_length=1)
+    viaticosCompletos: List[CajaMenudaViaticoEmployee] = Field(..., min_items=1)
 
 
 class Mision(BaseModel):

@@ -10,7 +10,7 @@ from ...core.database import get_db_financiero, get_db_rrhh
 from ...core.exceptions import BusinessException, ValidationException
 from ...api.deps import get_current_employee
 from ...models.mission import Mision as MisionModel, EstadoFlujo
-from ...schemas.mission import MisionCreate
+from ...schemas.mission import *
 
 # Esquemas específicos para empleados
 from pydantic import BaseModel, Field, validator
@@ -703,4 +703,570 @@ async def get_organizational_structure(db_rrhh: Session = Depends(get_db_rrhh)):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error obteniendo estructura organizacional"
+        )
+@router.put("/travel-expenses/{mission_id}", summary="Actualizar solicitud de viáticos")
+async def update_travel_expenses(
+    mission_id: int,
+    request: TravelExpensesUpdateRequest,
+    http_request: Request,
+    db_financiero: Session = Depends(get_db_financiero),
+    db_rrhh: Session = Depends(get_db_rrhh),
+    current_employee: dict = Depends(get_current_employee)
+):
+    """
+    Actualiza una solicitud de viáticos existente.
+    Solo permitido en estados: BORRADOR, DEVUELTO_CORRECCION
+    """
+    try:
+        # Obtener personal_id del empleado
+        cedula = current_employee.get("cedula")
+        personal_id = get_employee_personal_id(cedula, db_rrhh)
+        
+        # Verificar que la misión existe y pertenece al empleado
+        mision = db_financiero.query(MisionModel).filter(
+            MisionModel.id_mision == mission_id,
+            MisionModel.beneficiario_personal_id == personal_id,
+            MisionModel.tipo_mision == TipoMision.VIATICOS
+        ).first()
+        
+        if not mision:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Solicitud de viáticos no encontrada"
+            )
+        
+        # Verificar que está en estado editable
+        estados_editables = [11, 8]  # PENDIENTE_JEFE, DEVUELTO_CORRECCION
+        if mision.id_estado_flujo not in estados_editables:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Solo se pueden editar solicitudes en estado PENDIENTE_JEFE o DEVUELTO_CORRECCION"
+            )
+        
+        # Actualizar campos básicos si se proporcionan
+        if request.objetivo is not None:
+            mision.objetivo_mision = request.objetivo
+        if request.destino is not None:
+            mision.destino_mision = request.destino
+        if request.transporteOficial is not None:
+            mision.transporte_oficial = request.transporteOficial == 'SI'
+        if request.categoria is not None:
+            mision.categoria_beneficiario = request.categoria
+        
+        # Actualizar fechas si se proporcionan
+        if request.fechaSalida and request.horaSalida:
+            mision.fecha_salida = datetime.combine(
+                request.fechaSalida, 
+                datetime.strptime(request.horaSalida, '%H:%M').time()
+            )
+        
+        if request.fechaRetorno and request.horaRetorno:
+            mision.fecha_retorno = datetime.combine(
+                request.fechaRetorno,
+                datetime.strptime(request.horaRetorno, '%H:%M').time()
+            )
+        
+        # Actualizar viáticos completos si se proporcionan
+        if request.viaticosCompletos is not None:
+            # Eliminar existentes
+            db_financiero.execute(text("""
+                DELETE FROM items_viaticos_completos WHERE id_mision = :id_mision
+            """), {"id_mision": mission_id})
+            
+            # Insertar nuevos
+            for vc in request.viaticosCompletos:
+                db_financiero.execute(text("""
+                    INSERT INTO items_viaticos_completos 
+                    (id_mision, cantidad_dias, monto_por_dia) 
+                    VALUES (:id_mision, :cantidad_dias, :monto_por_dia)
+                """), {
+                    "id_mision": mission_id,
+                    "cantidad_dias": vc.cantidadDias,
+                    "monto_por_dia": vc.pagoPorDia
+                })
+        
+        # Actualizar viáticos parciales si se proporcionan
+        if request.viaticosParciales is not None:
+            # Eliminar existentes
+            db_financiero.execute(text("""
+                DELETE FROM items_viaticos WHERE id_mision = :id_mision
+            """), {"id_mision": mission_id})
+            
+            # Insertar nuevos
+            for vp in request.viaticosParciales:
+                monto_desayuno = convert_si_no_to_amount(vp.desayuno, mision.categoria_beneficiario, 'DESAYUNO')
+                monto_almuerzo = convert_si_no_to_amount(vp.almuerzo, mision.categoria_beneficiario, 'ALMUERZO')
+                monto_cena = convert_si_no_to_amount(vp.cena, mision.categoria_beneficiario, 'CENA')
+                monto_hospedaje = convert_si_no_to_amount(vp.hospedaje, mision.categoria_beneficiario, 'HOSPEDAJE')
+                
+                db_financiero.execute(text("""
+                    INSERT INTO items_viaticos 
+                    (id_mision, fecha, monto_desayuno, monto_almuerzo, monto_cena, monto_hospedaje, observaciones) 
+                    VALUES (:id_mision, :fecha, :monto_desayuno, :monto_almuerzo, :monto_cena, :monto_hospedaje, :observaciones)
+                """), {
+                    "id_mision": mission_id,
+                    "fecha": vp.fecha,
+                    "monto_desayuno": monto_desayuno,
+                    "monto_almuerzo": monto_almuerzo,
+                    "monto_cena": monto_cena,
+                    "monto_hospedaje": monto_hospedaje,
+                    "observaciones": vp.observaciones
+                })
+        
+        # Actualizar transporte si se proporciona
+        if request.transporteDetalle is not None:
+            # Eliminar existentes
+            db_financiero.execute(text("""
+                DELETE FROM items_transporte WHERE id_mision = :id_mision
+            """), {"id_mision": mission_id})
+            
+            # Insertar nuevos
+            for td in request.transporteDetalle:
+                db_financiero.execute(text("""
+                    INSERT INTO items_transporte 
+                    (id_mision, fecha, tipo, origen, destino, monto) 
+                    VALUES (:id_mision, :fecha, :tipo, :origen, :destino, :monto)
+                """), {
+                    "id_mision": mission_id,
+                    "fecha": td.fecha,
+                    "tipo": td.tipo,
+                    "origen": td.origen,
+                    "destino": td.destino,
+                    "monto": td.monto
+                })
+        
+        # Actualizar misiones al exterior si se proporciona
+        if request.misionesExterior is not None:
+            # Eliminar existentes
+            db_financiero.execute(text("""
+                DELETE FROM items_misiones_exterior WHERE id_mision = :id_mision
+            """), {"id_mision": mission_id})
+            
+            # Insertar nuevos
+            for me in request.misionesExterior:
+                db_financiero.execute(text("""
+                    INSERT INTO items_misiones_exterior 
+                    (id_mision, region, destino, fecha_salida, fecha_retorno, porcentaje) 
+                    VALUES (:id_mision, :region, :destino, :fecha_salida, :fecha_retorno, :porcentaje)
+                """), {
+                    "id_mision": mission_id,
+                    "region": me.region,
+                    "destino": me.destino,
+                    "fecha_salida": me.fechaSalida,
+                    "fecha_retorno": me.fechaRetorno,
+                    "porcentaje": me.porcentaje
+                })
+            
+            # Actualizar campos de viaje internacional
+            if request.misionesExterior:
+                mision.tipo_viaje = 'INTERNACIONAL'
+                mision.region_exterior = request.misionesExterior[0].region
+        
+        # Recalcular monto total
+        total_result = db_financiero.execute(text("""
+            SELECT 
+                COALESCE(SUM(vc.cantidad_dias * vc.monto_por_dia), 0) +
+                COALESCE(SUM(vp.monto_desayuno + vp.monto_almuerzo + vp.monto_cena + vp.monto_hospedaje), 0) +
+                COALESCE(SUM(t.monto), 0) as total
+            FROM misiones m
+            LEFT JOIN items_viaticos_completos vc ON m.id_mision = vc.id_mision
+            LEFT JOIN items_viaticos vp ON m.id_mision = vp.id_mision
+            LEFT JOIN items_transporte t ON m.id_mision = t.id_mision
+            WHERE m.id_mision = :id_mision
+        """), {"id_mision": mission_id})
+        
+        monto_total = total_result.fetchone().total or Decimal("0.00")
+        mision.monto_total_calculado = monto_total
+        mision.requiere_refrendo_cgr = monto_total >= Decimal("1000.00")
+        
+        # Obtener ID de usuario para auditoría
+        id_usuario = get_usuario_for_employee(personal_id, db_financiero)
+        client_ip = get_client_ip(http_request)
+        
+        # Registrar en historial
+        db_financiero.execute(text("""
+            INSERT INTO historial_flujo 
+            (id_mision, id_usuario_accion, id_estado_anterior, id_estado_nuevo, tipo_accion, comentarios, ip_usuario) 
+            VALUES (:id_mision, :id_usuario, :estado_anterior, :estado_nuevo, :accion, :comentario, :ip)
+        """), {
+            "id_mision": mission_id,
+            "id_usuario": id_usuario,
+            "estado_anterior": mision.id_estado_flujo,
+            "estado_nuevo": mision.id_estado_flujo,
+            "accion": "ACTUALIZAR",
+            "comentario": f"Solicitud de viáticos actualizada desde portal de empleados por {cedula}",
+            "ip": client_ip
+        })
+        
+        db_financiero.commit()
+        
+        return {
+            "success": True,
+            "message": "Solicitud de viáticos actualizada exitosamente",
+            "data": {
+                "id_mision": mission_id,
+                "monto_total": float(monto_total)
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db_financiero.rollback()
+        print(f"Error actualizando solicitud de viáticos: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error interno del servidor"
+        )
+
+@router.put("/petty-cash/{mission_id}", summary="Actualizar solicitud de caja menuda")
+async def update_petty_cash(
+    mission_id: int,
+    request: PettyCashUpdateRequest,
+    http_request: Request,
+    db_financiero: Session = Depends(get_db_financiero),
+    db_rrhh: Session = Depends(get_db_rrhh),
+    current_employee: dict = Depends(get_current_employee)
+):
+    """
+    Actualiza una solicitud de caja menuda existente.
+    Solo permitido en estados: BORRADOR, DEVUELTO_CORRECCION
+    """
+    try:
+        # Obtener personal_id del empleado
+        cedula = current_employee.get("cedula")
+        personal_id = get_employee_personal_id(cedula, db_rrhh)
+        
+        # Verificar que la misión existe y pertenece al empleado
+        mision = db_financiero.query(MisionModel).filter(
+            MisionModel.id_mision == mission_id,
+            MisionModel.beneficiario_personal_id == personal_id,
+            MisionModel.tipo_mision == TipoMision.CAJA_MENUDA
+        ).first()
+        
+        if not mision:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Solicitud de caja menuda no encontrada"
+            )
+        
+        # Verificar que está en estado editable
+        estados_editables = [11, 8]  # PENDIENTE_JEFE, DEVUELTO_CORRECCION
+        if mision.id_estado_flujo not in estados_editables:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Solo se pueden editar solicitudes en estado PENDIENTE_JEFE o DEVUELTO_CORRECCION"
+            )
+        
+        # ✅ GUARDAR ESTADO ANTERIOR ANTES DE CAMBIAR
+        estado_anterior = mision.id_estado_flujo
+        
+        # Actualizar campos básicos si se proporcionan
+        if request.trabajo_a_realizar is not None:
+            mision.objetivo_mision = request.trabajo_a_realizar
+        
+        if request.para is not None:
+            mision.destino_codnivel2 = int(request.para)
+            # Actualizar descripción del destino
+            destino_descripcion = get_department_description(request.para, db_rrhh)
+            mision.destino_mision = destino_descripcion
+        
+        # Actualizar viáticos de caja menuda si se proporcionan
+        if request.viaticosCompletos is not None:
+            # Obtener límite diario
+            limite_diario = Decimal(get_system_config_value("LIMITE_EFECTIVO_VIATICOS", db_financiero, "200"))
+            
+            # Validar límites
+            for viatico in request.viaticosCompletos:
+                total_dia = viatico.desayuno + viatico.almuerzo + viatico.cena + viatico.transporte
+                if total_dia > limite_diario:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Un viático excede el límite diario de B/. {limite_diario}"
+                    )
+                if total_dia <= 0:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Debe ingresar al menos un monto mayor a 0 por día"
+                    )
+            
+            # Eliminar viáticos existentes
+            db_financiero.execute(text("""
+                DELETE FROM misiones_caja_menuda WHERE id_mision = :id_mision
+            """), {"id_mision": mission_id})
+            
+            # Insertar nuevos viáticos
+            monto_total = Decimal("0.00")
+            for viatico in request.viaticosCompletos:
+                db_financiero.execute(text("""
+                    INSERT INTO misiones_caja_menuda 
+                    (id_mision, fecha, hora_de, hora_hasta, desayuno, almuerzo, cena, transporte) 
+                    VALUES (:id_mision, :fecha, :hora_de, :hora_hasta, :desayuno, :almuerzo, :cena, :transporte)
+                """), {
+                    "id_mision": mission_id,
+                    "fecha": viatico.fecha,
+                    "hora_de": viatico.horaDe,
+                    "hora_hasta": viatico.horaHasta,
+                    "desayuno": viatico.desayuno,
+                    "almuerzo": viatico.almuerzo,
+                    "cena": viatico.cena,
+                    "transporte": viatico.transporte
+                })
+                
+                monto_total += viatico.desayuno + viatico.almuerzo + viatico.cena + viatico.transporte
+            
+            # Actualizar monto total
+            mision.monto_total_calculado = monto_total
+        
+        # ✅ CAMBIAR ESTADO A PENDIENTE_JEFE DESPUÉS DE EDITAR
+        mision.id_estado_flujo = 11  # PENDIENTE_JEFE
+        
+        # Obtener ID de usuario para auditoría
+        id_usuario = get_usuario_for_employee(personal_id, db_financiero)
+        client_ip = get_client_ip(http_request)
+        
+        # ✅ REGISTRAR EN HISTORIAL CON CAMBIO DE ESTADO
+        db_financiero.execute(text("""
+            INSERT INTO historial_flujo 
+            (id_mision, id_usuario_accion, id_estado_anterior, id_estado_nuevo, tipo_accion, comentarios, ip_usuario) 
+            VALUES (:id_mision, :id_usuario, :estado_anterior, :estado_nuevo, :accion, :comentario, :ip)
+        """), {
+            "id_mision": mission_id,
+            "id_usuario": id_usuario,
+            "estado_anterior": estado_anterior,  # ✅ Estado anterior real
+            "estado_nuevo": 11,  # ✅ PENDIENTE_JEFE
+            "accion": "ACTUALIZAR",
+            "comentario": f"Solicitud de caja menuda actualizada desde portal de empleados por {cedula} - Enviada para aprobación",
+            "ip": client_ip
+        })
+        
+        db_financiero.commit()
+        
+        return {
+            "success": True,
+            "message": "Solicitud de caja menuda actualizada y enviada para aprobación",
+            "data": {
+                "id_mision": mission_id,
+                "monto_total": float(mision.monto_total_calculado),
+                "estado": "PENDIENTE_JEFE"  # ✅ Informar nuevo estado
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db_financiero.rollback()
+        print(f"Error actualizando solicitud de caja menuda: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error interno del servidor"
+        )
+
+@router.get("/{mission_id}", summary="Obtener detalles completos de una solicitud")
+async def get_mission_details(
+    mission_id: int,
+    db_financiero: Session = Depends(get_db_financiero),
+    db_rrhh: Session = Depends(get_db_rrhh),
+    current_employee: dict = Depends(get_current_employee)
+):
+    """
+    Obtiene los detalles COMPLETOS de una solicitud específica con todos sus items.
+    """
+    try:
+        # Obtener personal_id del empleado
+        cedula = current_employee.get("cedula")
+        personal_id = get_employee_personal_id(cedula, db_rrhh)
+        
+        # Buscar la misión
+        mision = db_financiero.query(MisionModel).filter(
+            MisionModel.id_mision == mission_id,
+            MisionModel.beneficiario_personal_id == personal_id
+        ).first()
+        
+        if not mision:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Solicitud no encontrada"
+            )
+        
+        # ✅ OBTENER NOMBRES DE VICEPRESIDENCIA Y DEPARTAMENTO
+        departamento_info = None
+        vicepresidencia_info = None
+        
+        if mision.destino_codnivel2:
+            # Obtener información del departamento (nivel2)
+            dept_result = db_rrhh.execute(text("""
+                SELECT n2.codorg, n2.descrip as dept_name, n2.gerencia,
+                       n1.codorg as vice_codigo, n1.descrip as vice_name
+                FROM aitsa_rrhh.nomnivel2 n2
+                LEFT JOIN aitsa_rrhh.nomnivel1 n1 ON n2.gerencia = n1.codorg
+                WHERE n2.codorg = :codigo
+            """), {"codigo": str(mision.destino_codnivel2)})
+            
+            dept_row = dept_result.fetchone()
+            if dept_row:
+                departamento_info = {
+                    "codigo": dept_row.codorg,
+                    "nombre": dept_row.dept_name,
+                    "gerencia": dept_row.gerencia
+                }
+                if dept_row.vice_codigo and dept_row.vice_name:
+                    vicepresidencia_info = {
+                        "codigo": dept_row.vice_codigo,
+                        "nombre": dept_row.vice_name
+                    }
+        
+        # Datos básicos de la misión
+        mission_data = {
+            "id_mision": mision.id_mision,
+            "numero_solicitud": mision.numero_solicitud,
+            "tipo_mision": str(mision.tipo_mision),
+            "objetivo_mision": mision.objetivo_mision,
+            "destino_mision": mision.destino_mision,
+            "categoria_beneficiario": str(mision.categoria_beneficiario) if mision.categoria_beneficiario else None,
+            "tipo_viaje": str(mision.tipo_viaje) if mision.tipo_viaje else None,
+            "region_exterior": mision.region_exterior,
+            "fecha_salida": mision.fecha_salida.isoformat() if mision.fecha_salida else None,
+            "fecha_retorno": mision.fecha_retorno.isoformat() if mision.fecha_retorno else None,
+            "transporte_oficial": mision.transporte_oficial,
+            "monto_total_calculado": float(mision.monto_total_calculado),
+            "monto_aprobado": float(mision.monto_aprobado) if mision.monto_aprobado else None,
+            "fecha_limite_presentacion": mision.fecha_limite_presentacion.isoformat() if mision.fecha_limite_presentacion else None,
+            
+            # ✅ AGREGAR INFORMACIÓN DE DEPARTAMENTO Y VICEPRESIDENCIA
+            "departamento": departamento_info,
+            "vicepresidencia": vicepresidencia_info,
+            
+            "estado_flujo": {
+                "id_estado_flujo": mision.estado_flujo.id_estado_flujo,
+                "nombre_estado": mision.estado_flujo.nombre_estado,
+                "descripcion": mision.estado_flujo.descripcion
+            } if mision.estado_flujo else None,
+            "can_edit": mision.id_estado_flujo in [11, 8],  # PENDIENTE_JEFE, DEVUELTO_CORRECCION
+            "created_at": mision.created_at.isoformat() if mision.created_at else None,
+            "updated_at": mision.updated_at.isoformat() if mision.updated_at else None
+        }
+        
+        # DETALLES ESPECÍFICOS SEGÚN EL TIPO (igual que antes)
+        if mision.tipo_mision == TipoMision.VIATICOS:
+            # Obtener viáticos completos
+            viaticos_completos_result = db_financiero.execute(text("""
+                SELECT cantidad_dias, monto_por_dia
+                FROM items_viaticos_completos 
+                WHERE id_mision = :id_mision
+                ORDER BY id_item_viatico_completo
+            """), {"id_mision": mission_id})
+            
+            viaticos_completos = []
+            for row in viaticos_completos_result.fetchall():
+                viaticos_completos.append({
+                    "cantidadDias": row.cantidad_dias,
+                    "pagoPorDia": float(row.monto_por_dia)
+                })
+            
+            # Obtener viáticos parciales
+            viaticos_parciales_result = db_financiero.execute(text("""
+                SELECT fecha, monto_desayuno, monto_almuerzo, monto_cena, monto_hospedaje
+                FROM items_viaticos 
+                WHERE id_mision = :id_mision
+                ORDER BY fecha
+            """), {"id_mision": mission_id})
+            
+            viaticos_parciales = []
+            for row in viaticos_parciales_result.fetchall():
+                viaticos_parciales.append({
+                    "fecha": row.fecha.isoformat(),
+                    "desayuno": "SI" if row.monto_desayuno > 0 else "NO",
+                    "almuerzo": "SI" if row.monto_almuerzo > 0 else "NO", 
+                    "cena": "SI" if row.monto_cena > 0 else "NO",
+                    "hospedaje": "SI" if row.monto_hospedaje > 0 else "NO",
+                    "monto_desayuno": float(row.monto_desayuno),
+                    "monto_almuerzo": float(row.monto_almuerzo),
+                    "monto_cena": float(row.monto_cena),
+                    "monto_hospedaje": float(row.monto_hospedaje)
+                })
+            
+            # Obtener transporte
+            transporte_result = db_financiero.execute(text("""
+                SELECT fecha, tipo, origen, destino, monto
+                FROM items_transporte 
+                WHERE id_mision = :id_mision
+                ORDER BY fecha
+            """), {"id_mision": mission_id})
+            
+            transporte_detalle = []
+            for row in transporte_result.fetchall():
+                transporte_detalle.append({
+                    "fecha": row.fecha.isoformat(),
+                    "tipo": row.tipo,
+                    "origen": row.origen,
+                    "destino": row.destino,
+                    "monto": float(row.monto),
+                })
+            
+            # Obtener misiones al exterior
+            exterior_result = db_financiero.execute(text("""
+                SELECT region, destino, fecha_salida, fecha_retorno, porcentaje
+                FROM items_misiones_exterior 
+                WHERE id_mision = :id_mision
+                ORDER BY fecha_salida
+            """), {"id_mision": mission_id})
+            
+            misiones_exterior = []
+            for row in exterior_result.fetchall():
+                misiones_exterior.append({
+                    "region": row.region,
+                    "destino": row.destino,
+                    "fechaSalida": row.fecha_salida.isoformat(),
+                    "fechaRetorno": row.fecha_retorno.isoformat(),
+                    "porcentaje": float(row.porcentaje)
+                })
+            
+            # Agregar detalles de viáticos
+            mission_data["detalles"] = {
+                "viaticosCompletos": viaticos_completos,
+                "viaticosParciales": viaticos_parciales,
+                "transporteDetalle": transporte_detalle,
+                "misionesExterior": misiones_exterior
+            }
+            
+        elif mision.tipo_mision == TipoMision.CAJA_MENUDA:
+            # Obtener viáticos de caja menuda
+            caja_menuda_result = db_financiero.execute(text("""
+                SELECT fecha, hora_de, hora_hasta, desayuno, almuerzo, cena, transporte
+                FROM misiones_caja_menuda 
+                WHERE id_mision = :id_mision
+                ORDER BY fecha, hora_de
+            """), {"id_mision": mission_id})
+            
+            viaticos_caja_menuda = []
+            for row in caja_menuda_result.fetchall():
+                viaticos_caja_menuda.append({
+                    "fecha": row.fecha.isoformat(),
+                    "horaDe": row.hora_de,
+                    "horaHasta": row.hora_hasta,
+                    "desayuno": float(row.desayuno),
+                    "almuerzo": float(row.almuerzo),
+                    "cena": float(row.cena),
+                    "transporte": float(row.transporte)
+                })
+            
+            # Agregar detalles de caja menuda
+            mission_data["detalles"] = {
+                "viaticosCompletos": viaticos_caja_menuda,
+                "destino_codnivel2": mision.destino_codnivel2
+            }
+        
+        return {
+            "success": True,
+            "data": mission_data
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error obteniendo detalles de misión: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error obteniendo detalles: {str(e)}"
         )

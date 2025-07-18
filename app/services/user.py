@@ -390,3 +390,66 @@ class UserService:
         self.db.refresh(role)
         
         return role
+
+    def get_employee_complete_info(self, personal_id: int) -> Optional[dict]:
+        """Get complete employee information from RRHH system"""
+        try:
+            query = text("""
+                SELECT 
+                    p.personal_id,
+                    p.apenom as nombre_completo,
+                    p.cedula,
+                    p.ficha as numero_trabajador,
+                    n1.descrip as vicepresidencia,
+                    d.Descripcion as departamento,
+                    -- ✅ CORRECCIÓN: JOIN por cédula, no por personal_id
+                    jefe.apenom as jefe_inmediato,
+                    -- ✅ CORRECCIÓN: Comparar como string
+                    CASE 
+                        WHEN j.es_rotativo = '1' THEN 'Rotativo'
+                        ELSE 'Administrativo'
+                    END as tipo_trabajador,
+                    f.descripcion_funcion as cargo,
+                    f.titulo_puesto,
+                    j.des_jor as turno,
+                    -- ✅ CORRECCIÓN: Obtener horas reales del turno
+                    CONCAT(
+                        IFNULL(t.hora_entrada, '08:00:00'), 
+                        ' - ', 
+                        IFNULL(t.hora_salida, '16:30:00')
+                    ) as horario_trabajo
+                FROM aitsa_rrhh.nompersonal p
+                LEFT JOIN aitsa_rrhh.nomnivel1 n1 ON p.codnivel1 = n1.codorg
+                LEFT JOIN aitsa_rrhh.departamento d ON p.IdDepartamento = d.IdDepartamento
+                -- ✅ CORRECCIÓN: JOIN correcto para jefe
+                LEFT JOIN aitsa_rrhh.nompersonal jefe ON d.IdJefe = jefe.cedula
+                LEFT JOIN aitsa_rrhh.nomfuncion f ON p.nomfuncion_id = f.nomfuncion_id + 0
+                LEFT JOIN aitsa_rrhh.jornadas j ON p.cod_jor = j.cod_jor AND j.activo = 1
+                LEFT JOIN aitsa_rrhh.turnos t ON p.turno_id = t.id
+                WHERE p.personal_id = :personal_id AND p.estado != 'De Baja'
+            """)
+            
+            result = self.db.execute(query, {"personal_id": personal_id})
+            row = result.fetchone()
+            
+            if not row:
+                return None
+                
+            return {
+                "personal_id": row.personal_id,
+                "nombre_completo": row.nombre_completo,
+                "cedula": row.cedula,
+                "numero_trabajador": row.numero_trabajador,
+                "vicepresidencia": row.vicepresidencia or "No asignada",
+                "departamento": row.departamento or "No asignado", 
+                "jefe_inmediato": row.jefe_inmediato or "No asignado",
+                "tipo_trabajador": row.tipo_trabajador,
+                "cargo": row.cargo or "No asignado",
+                "titulo_puesto": row.titulo_puesto or "No especificado",
+                "horario_trabajo": row.horario_trabajo,
+                "turno": row.turno or "Diurno"
+            }
+            
+        except Exception as e:
+            print(f"Error getting employee info: {e}")
+            return None
