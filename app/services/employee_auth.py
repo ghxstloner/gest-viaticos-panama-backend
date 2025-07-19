@@ -88,6 +88,12 @@ class EmployeeAuthService:
         role_id = 2 if is_department_head else 1  # 2 = Jefe Inmediato, 1 = Solicitante
         role_name = "Jefe Inmediato" if is_department_head else "Solicitante"
 
+        # ✅ OBTENER PERMISOS DINÁMICAMENTE SEGÚN EL ROL ASIGNADO
+        # Usar la base de datos financiera si está disponible, sino usar la de RRHH
+        db_for_permissions = self.db_financiero if self.db_financiero else self.db
+        user_service = UserService(db_for_permissions)
+        permisos_usuario = user_service.get_user_permissions_by_role(role_id)
+        
         # Crear token con datos completos para empleado
         token_data = {
             "sub": f"employee:{employee['cedula']}",
@@ -97,17 +103,12 @@ class EmployeeAuthService:
             "nombre": employee["apenom"],
             "is_department_head": is_department_head,
             "managed_departments": managed_departments,
-            "id_rol": role_id  # ✅ INCLUIR ID DEL ROL EN EL TOKEN
+            "id_rol": role_id,  # ✅ INCLUIR ID DEL ROL EN EL TOKEN
+            "permisos_usuario": permisos_usuario["estructura"]  # ✅ INCLUIR PERMISOS EN EL TOKEN
         }
         
         expires_delta = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
         access_token = create_access_token(data=token_data, expires_delta=expires_delta)
-
-        # ✅ OBTENER PERMISOS DINÁMICAMENTE SEGÚN EL ROL ASIGNADO
-        # Usar la base de datos financiera si está disponible, sino usar la de RRHH
-        db_for_permissions = self.db_financiero if self.db_financiero else self.db
-        user_service = UserService(db_for_permissions)
-        permisos_usuario = user_service.get_user_permissions_by_role(role_id)
         
         # Estructura de respuesta para empleados con permisos dinámicos
         user_data = {

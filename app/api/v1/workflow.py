@@ -8,7 +8,7 @@ from sqlalchemy import text
 
 from ...core.database import get_db_financiero, get_db_rrhh
 from ...core.exceptions import WorkflowException, BusinessException, PermissionException
-from ...api.deps import get_current_user, get_current_employee_with_role, get_current_user_universal, get_current_employee
+from ...api.deps import get_current_user, get_current_user_universal, get_current_employee
 from ...models.user import Usuario
 from ...models.mission import EstadoFlujo, TransicionFlujo, HistorialFlujo
 from ...schemas.workflow import *
@@ -39,40 +39,122 @@ def get_client_ip(request: Request) -> str:
     
     return request.client.host if request.client else "127.0.0.1"
 
-def get_role_name(user: Union[Usuario, dict]) -> str:
-    """Función mejorada para obtener y normalizar el nombre del rol"""
-    if isinstance(user, Usuario):
-        role = (user.rol.nombre_rol or "").strip().lower()
+def has_permission(user: Union[Usuario, dict], permission_code: str) -> bool:
+    """Función helper para verificar permisos - versión CORRECTA"""
+    print(f"🔍 DEBUG has_permission - Verificando {permission_code} para usuario tipo: {type(user)}")
+    
+    if isinstance(user, dict):
+        # Para empleados, verificar permisos en el dict con estructura anidada
+        permissions = user.get('permisos_usuario', {})
+        print(f"🔍 DEBUG has_permission - permisos_usuario: {permissions}")
+        
+        # Mapeo de códigos de permisos a la estructura de empleados
+        permission_mapping = {
+            'MISSION_APPROVE': permissions.get('misiones', {}).get('aprobar', False),
+            'MISSION_REJECT': permissions.get('misiones', {}).get('aprobar', False),  # Mismo permiso para aprobar/rechazar
+            'MISSION_CREATE': permissions.get('misiones', {}).get('crear', False),
+            'MISSION_EDIT': permissions.get('misiones', {}).get('editar', False),
+            'MISSION_VIEW': permissions.get('misiones', {}).get('ver', False),
+            'MISSION_PAYMMENT': permissions.get('misiones', {}).get('pagar', False),
+            'GESTION_SOLICITUDES_VIEW': permissions.get('gestion_solicitudes', {}).get('ver', False),
+            'REPORTS_VIEW': permissions.get('reportes', {}).get('ver', False),
+        }
+        
+        result = permission_mapping.get(permission_code, False)
+        print(f"🔍 DEBUG has_permission - {permission_code}: {result}")
+        return result
     else:
-        role = (user.get("role_name", "") or "").strip().lower()
-    
-    # Normalizar roles conocidos para evitar problemas de comparación
-    role_mapping = {
-        "jefe inmediato": "jefe inmediato",
-        "analista tesorería": "analista tesorería",
-        "analista tesoreria": "analista tesorería",  # Sin tilde
-        "analista presupuesto": "analista presupuesto",
-        "analista contabilidad": "analista contabilidad",
-        "director finanzas": "director finanzas",
-        "fiscalizador cgr": "fiscalizador cgr",
-        "custodio caja menuda": "custodio caja menuda",
-        "administrador sistema": "administrador sistema",
-        "solicitante": "solicitante"
-    }
-    
-    return role_mapping.get(role, role)
+        # Para usuarios financieros, usar el método del modelo
+        try:
+            # MÉTODO 1: Usar el método has_permission del modelo
+            if hasattr(user, 'has_permission'):
+                result = user.has_permission(permission_code)
+                return result
+            
+            # MÉTODO 2: Buscar en user.rol.permisos
+            elif hasattr(user, 'rol') and hasattr(user.rol, 'permisos'):
+                permisos = user.rol.permisos
+                for permiso in permisos:
+                    if hasattr(permiso, 'codigo') and permiso.codigo == permission_code:
+                        return True
+                return False
+            
+            return False
+            
+        except Exception as e:
+            print(f"🔍 ERROR verificando permisos: {e}")
+            return False
+
+def get_user_permissions(user: Union[Usuario, dict]) -> List[str]:
+    """Obtiene lista de códigos de permisos del usuario - versión CORRECTA"""
+    if isinstance(user, dict):
+        permissions = user.get('permisos_usuario', {})
+        if isinstance(permissions, dict):
+            # Para empleados, convertir la estructura anidada a códigos de permisos
+            permission_codes = []
+            
+            # Misiones
+            misiones = permissions.get('misiones', {})
+            if misiones.get('ver'):
+                permission_codes.append('MISSION_VIEW')
+            if misiones.get('crear'):
+                permission_codes.append('MISSION_CREATE')
+            if misiones.get('editar'):
+                permission_codes.append('MISSION_EDIT')
+            if misiones.get('aprobar'):
+                permission_codes.append('MISSION_APPROVE')
+                permission_codes.append('MISSION_REJECT')
+            if misiones.get('pagar'):
+                permission_codes.append('MISSION_PAYMMENT')
+            
+            # Gestión de solicitudes
+            gestion = permissions.get('gestion_solicitudes', {})
+            if gestion.get('ver'):
+                permission_codes.append('GESTION_SOLICITUDES_VIEW')
+            
+            # Reportes
+            reportes = permissions.get('reportes', {})
+            if reportes.get('ver'):
+                permission_codes.append('REPORTS_VIEW')
+            
+            return permission_codes
+        elif isinstance(permissions, list):
+            return permissions
+        return []
+    else:
+        try:
+            # MÉTODO 1: Usar get_permissions del modelo
+            if hasattr(user, 'get_permissions'):
+                permisos = user.get_permissions()
+                return permisos
+            
+            # MÉTODO 2: Extraer códigos de user.rol.permisos
+            elif hasattr(user, 'rol') and hasattr(user.rol, 'permisos'):
+                codes = []
+                for permiso in user.rol.permisos:
+                    if hasattr(permiso, 'codigo'):
+                        codes.append(permiso.codigo)
+                return codes
+            
+            return []
+        except Exception as e:
+            print(f"🔍 ERROR obteniendo permisos: {e}")
+            return []
 
 def is_jefe_inmediato(user: Union[Usuario, dict]) -> bool:
-    """Función para verificar si el usuario es jefe inmediato"""
+    """Función para verificar si el usuario es jefe inmediato usando permisos"""
     if isinstance(user, dict):
-        # Para empleados, verificar tanto el rol como el flag is_department_head
-        role_name = get_role_name(user)
-        is_department_head = user.get("is_department_head", False)
-        return "jefe" in role_name or is_department_head or role_name == "jefe inmediato"
+        has_approve_permission = has_permission(user, 'MISSION_APPROVE')
+        is_department_head = user.get('is_department_head', False)
+        return has_approve_permission and is_department_head
     else:
-        # Para usuarios financieros
-        role_name = get_role_name(user)
-        return "jefe" in role_name or role_name == "jefe inmediato"
+        # Para usuarios financieros, solo verificar el permiso
+        return has_permission(user, 'MISSION_APPROVE')
+
+def validate_employee_user(user):
+    """Valida que el usuario sea un empleado - DEPRECATED: Ahora se usa validación por permisos"""
+    # Esta función se mantiene por compatibilidad pero ya no valida tipo de usuario
+    return user
 
 # ===============================================
 # ENDPOINTS UNIVERSALES (EMPLEADOS Y FINANCIEROS)
@@ -82,24 +164,20 @@ def is_jefe_inmediato(user: Union[Usuario, dict]) -> bool:
 async def get_available_actions(
     mission_id: int,
     workflow_service: WorkflowService = Depends(get_workflow_service),
-    current_user: Optional[Usuario] = Depends(get_current_user),
-    current_employee: Optional[dict] = Depends(get_current_employee_with_role)
+    current_user = Depends(get_current_user_universal)
 ):
     """
     Obtiene las acciones disponibles para un usuario en una misión específica.
     Funciona tanto para usuarios financieros como empleados.
     """
     try:
-        # Determinar qué tipo de usuario es
-        user = current_user if current_user else current_employee
-        
-        if not user:
+        if not current_user:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Usuario no autenticado"
             )
         
-        return workflow_service.get_available_actions(mission_id, user)
+        return workflow_service.get_available_actions(mission_id, current_user)
         
     except (WorkflowException, PermissionException) as e:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
@@ -109,24 +187,22 @@ async def get_available_actions(
 @router.get("/states/my-relevant", response_model=List[WorkflowStateInfo])
 async def get_my_relevant_states(
     workflow_service: WorkflowService = Depends(get_workflow_service),
-    current_user: Optional[Usuario] = Depends(get_current_user),
-    current_employee: Optional[dict] = Depends(get_current_employee_with_role)
+    current_user = Depends(get_current_user_universal)
 ):
     """
     Obtiene los estados de workflow relevantes para el usuario actual.
     """
     try:
-        user = current_user if current_user else current_employee
-        if not user:
+        if not current_user:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuario no autenticado")
         
-        return workflow_service.get_workflow_states_by_role(user)
+        return workflow_service.get_workflow_states_by_role(current_user)
         
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 # ===============================================
-# ENDPOINTS ESPECÍFICOS PARA JEFES INMEDIATOS (EMPLEADOS)
+# ENDPOINTS PARA APROBACIONES Y ACCIONES DE WORKFLOW
 # ===============================================
 
 @router.post("/missions/{mission_id}/jefe/aprobar", response_model=WorkflowTransitionResponse)
@@ -134,15 +210,28 @@ async def jefe_approve_mission(
     mission_id: int,
     request_data: JefeApprovalRequest,
     workflow_service: WorkflowService = Depends(get_workflow_service),
-    current_employee: dict = Depends(get_current_employee_with_role),
+    current_user = Depends(get_current_user_universal),
     client_ip: str = Depends(get_client_ip)
 ):
     """
-    Permite al jefe inmediato aprobar una solicitud.
-    Solo disponible para empleados con rol de Jefe Inmediato.
+    Permite aprobar una solicitud (empleados jefes o usuarios financieros con permisos).
     """
     try:
-        if not is_jefe_inmediato(current_employee):
+        if not current_user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Usuario no autenticado"
+            )
+        
+        # Verificar permisos
+        if not has_permission(current_user, 'MISSION_APPROVE'):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Permiso requerido: MISSION_APPROVE"
+            )
+        
+        # Para empleados, verificar que es jefe de departamento
+        if isinstance(current_user, dict) and not current_user.get('is_department_head', False):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Solo los jefes de departamento pueden aprobar solicitudes"
@@ -151,7 +240,7 @@ async def jefe_approve_mission(
         return workflow_service.execute_workflow_action(
             mission_id=mission_id,
             action="APROBAR",
-            user=current_employee,
+            user=current_user,
             request_data=request_data,
             client_ip=client_ip
         )
@@ -166,15 +255,28 @@ async def jefe_reject_mission(
     mission_id: int,
     request_data: JefeRejectionRequest,
     workflow_service: WorkflowService = Depends(get_workflow_service),
-    current_employee: dict = Depends(get_current_employee_with_role),
+    current_user = Depends(get_current_user_universal),
     client_ip: str = Depends(get_client_ip)
 ):
     """
-    Permite al jefe inmediato rechazar una solicitud.
-    Requiere especificar el motivo del rechazo.
+    Permite rechazar una solicitud (empleados jefes o usuarios financieros con permisos).
     """
     try:
-        if not is_jefe_inmediato(current_employee):
+        if not current_user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Usuario no autenticado"
+            )
+        
+        # Verificar permisos
+        if not has_permission(current_user, 'MISSION_REJECT'):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Permiso requerido: MISSION_REJECT"
+            )
+        
+        # Para empleados, verificar que es jefe de departamento
+        if isinstance(current_user, dict) and not current_user.get('is_department_head', False):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Solo los jefes de departamento pueden rechazar solicitudes"
@@ -183,7 +285,7 @@ async def jefe_reject_mission(
         return workflow_service.execute_workflow_action(
             mission_id=mission_id,
             action="RECHAZAR",
-            user=current_employee,
+            user=current_user,
             request_data=request_data,
             client_ip=client_ip
         )
@@ -191,6 +293,171 @@ async def jefe_reject_mission(
     except (WorkflowException, PermissionException) as e:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
     except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+@router.post("/missions/{mission_id}/jefe/devolver", response_model=WorkflowTransitionResponse)
+async def jefe_return_for_correction(
+    mission_id: int,
+    request_data: JefeReturnRequest,
+    workflow_service: WorkflowService = Depends(get_workflow_service),
+    current_user = Depends(get_current_user_universal),
+    client_ip: str = Depends(get_client_ip),
+    db: Session = Depends(get_db_financiero)
+):
+    """
+    Permite devolver una solicitud para corrección (empleados jefes o usuarios financieros con permisos).
+    """
+    try:
+        if not current_user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Usuario no autenticado"
+            )
+        
+        if not is_jefe_inmediato(current_user):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Solo los jefes de departamento pueden devolver solicitudes"
+            )
+        
+        # Obtener y validar la misión
+        mision = workflow_service._get_mission_with_validation(mission_id, current_user)
+        
+        # Solo validar supervisión si es empleado
+        if isinstance(current_user, dict):
+            workflow_service._validate_employee_supervision(mision, current_user)
+        
+        estado_anterior = mision.estado_flujo.nombre_estado
+        estado_anterior_id = mision.id_estado_flujo
+        
+        # Cambiar estado directamente
+        mision.id_estado_flujo = 8  # DEVUELTO_CORRECCION
+        
+        # Crear historial
+        user_id = current_user.id_usuario if isinstance(current_user, Usuario) else 1
+        user_name = current_user.login_username if isinstance(current_user, Usuario) else current_user.get('apenom', 'Usuario')
+        
+        historial = HistorialFlujo(
+            id_mision=mision.id_mision,
+            id_usuario_accion=user_id,
+            id_estado_anterior=estado_anterior_id,
+            id_estado_nuevo=8,
+            tipo_accion="DEVOLVER",
+            comentarios=request_data.comentarios,
+            datos_adicionales={
+                'motivo': request_data.motivo,
+                'observaciones_correccion': getattr(request_data, 'observaciones_correccion', None),
+                'usuario_cedula': current_user.get('cedula') if isinstance(current_user, dict) else None,
+                'usuario_nombre': user_name
+            },
+            ip_usuario=client_ip
+        )
+        
+        db.add(historial)
+        db.commit()
+        
+        return WorkflowTransitionResponse(
+            success=True,
+            message=f'Solicitud devuelta para corrección por {user_name}',
+            mission_id=mission_id,
+            estado_anterior=estado_anterior,
+            estado_nuevo="DEVUELTO_CORRECCION",
+            accion_ejecutada="DEVOLVER",
+            requiere_accion_adicional=True,
+            datos_transicion={
+                'motivo': request_data.motivo,
+                'observaciones_correccion': getattr(request_data, 'observaciones_correccion', None)
+            }
+        )
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+@router.post("/missions/{mission_id}/jefe/aprobar-directo", response_model=WorkflowTransitionResponse)
+async def jefe_approve_direct_payment(
+    mission_id: int,
+    request_data: JefeDirectApprovalRequest,
+    workflow_service: WorkflowService = Depends(get_workflow_service),
+    current_user = Depends(get_current_user_universal),
+    client_ip: str = Depends(get_client_ip),
+    db: Session = Depends(get_db_financiero)
+):
+    """
+    Permite aprobar directamente para pago (empleados jefes o usuarios financieros con permisos).
+    """
+    try:
+        if not current_user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Usuario no autenticado"
+            )
+        
+        if not is_jefe_inmediato(current_user):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Solo los jefes de departamento pueden aprobar solicitudes"
+            )
+        
+        # Obtener y validar la misión
+        mision = workflow_service._get_mission_with_validation(mission_id, current_user)
+        
+        # Solo validar supervisión si es empleado
+        if isinstance(current_user, dict):
+            workflow_service._validate_employee_supervision(mision, current_user)
+        
+        estado_anterior = mision.estado_flujo.nombre_estado
+        estado_anterior_id = mision.id_estado_flujo
+        
+        # Actualizar monto si se especifica
+        if hasattr(request_data, 'monto_aprobado') and request_data.monto_aprobado:
+            mision.monto_aprobado = request_data.monto_aprobado
+        else:
+            mision.monto_aprobado = mision.monto_total_calculado
+        
+        # Cambiar estado directamente
+        mision.id_estado_flujo = 6  # APROBADO_PARA_PAGO
+        
+        # Crear historial
+        user_id = current_user.id_usuario if isinstance(current_user, Usuario) else 1
+        user_name = current_user.login_username if isinstance(current_user, Usuario) else current_user.get('apenom', 'Usuario')
+        
+        historial = HistorialFlujo(
+            id_mision=mision.id_mision,
+            id_usuario_accion=user_id,
+            id_estado_anterior=estado_anterior_id,
+            id_estado_nuevo=6,
+            tipo_accion="APROBAR_DIRECTO",
+            comentarios=request_data.comentarios,
+            datos_adicionales={
+                'justificacion': getattr(request_data, 'justificacion', 'Aprobación directa'),
+                'es_emergencia': getattr(request_data, 'es_emergencia', False),
+                'monto_aprobado': float(mision.monto_aprobado),
+                'usuario_cedula': current_user.get('cedula') if isinstance(current_user, dict) else None,
+                'usuario_nombre': user_name
+            },
+            ip_usuario=client_ip
+        )
+        
+        db.add(historial)
+        db.commit()
+        
+        return WorkflowTransitionResponse(
+            success=True,
+            message=f'Solicitud aprobada directamente para pago por {user_name}',
+            mission_id=mission_id,
+            estado_anterior=estado_anterior,
+            estado_nuevo="APROBADO_PARA_PAGO",
+            accion_ejecutada="APROBAR_DIRECTO",
+            requiere_accion_adicional=False,
+            datos_transicion={
+                'justificacion': getattr(request_data, 'justificacion', 'Aprobación directa'),
+                'monto_aprobado': float(mision.monto_aprobado)
+            }
+        )
+        
+    except Exception as e:
+        db.rollback()
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 # ===============================================
@@ -206,11 +473,14 @@ async def tesoreria_approve_mission(
     client_ip: str = Depends(get_client_ip)
 ):
     """
-    Permite al Analista de Tesorería aprobar una solicitud.
+    Permite aprobar una solicitud en tesorería.
     """
     try:
-        if current_user.rol.nombre_rol != "Analista Tesorería":
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acceso denegado")
+        if not has_permission(current_user, 'PAGOS_VIEW') or not has_permission(current_user, 'MISSION_APPROVE'):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Permisos requeridos: PAGOS_VIEW y MISSION_APPROVE"
+            )
         
         return workflow_service.execute_workflow_action(
             mission_id=mission_id,
@@ -234,12 +504,14 @@ async def presupuesto_assign_budget(
     client_ip: str = Depends(get_client_ip)
 ):
     """
-    Permite al Analista de Presupuesto asignar partidas presupuestarias.
-    Requiere especificar las partidas y montos correspondientes.
+    Permite asignar partidas presupuestarias.
     """
     try:
-        if current_user.rol.nombre_rol != "Analista Presupuesto":
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acceso denegado")
+        if not has_permission(current_user, 'PRESUPUESTO_VIEW') or not has_permission(current_user, 'MISSION_APPROVE'):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Permisos requeridos: PRESUPUESTO_VIEW y MISSION_APPROVE"
+            )
         
         return workflow_service.execute_workflow_action(
             mission_id=mission_id,
@@ -263,12 +535,14 @@ async def contabilidad_approve_mission(
     client_ip: str = Depends(get_client_ip)
 ):
     """
-    Permite al Analista de Contabilidad aprobar una solicitud.
-    Puede incluir información contable específica.
+    Permite aprobar en contabilidad.
     """
     try:
-        if current_user.rol.nombre_rol != "Analista Contabilidad":
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acceso denegado")
+        if not has_permission(current_user, 'CONTABILIDAD_VIEW') or not has_permission(current_user, 'MISSION_APPROVE'):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Permisos requeridos: CONTABILIDAD_VIEW y MISSION_APPROVE"
+            )
         
         return workflow_service.execute_workflow_action(
             mission_id=mission_id,
@@ -292,12 +566,14 @@ async def finanzas_approve_mission(
     client_ip: str = Depends(get_client_ip)
 ):
     """
-    Permite al Director de Finanzas realizar la aprobación final.
-    Puede especificar el monto final aprobado y determina si requiere refrendo CGR.
+    Permite aprobación final de finanzas.
     """
     try:
-        if current_user.rol.nombre_rol != "Director Finanzas":
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acceso denegado")
+        if not has_permission(current_user, 'MISSION_APPROVE'):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Permiso requerido: MISSION_APPROVE"
+            )
         
         return workflow_service.execute_workflow_action(
             mission_id=mission_id,
@@ -321,11 +597,14 @@ async def cgr_approve_mission(
     client_ip: str = Depends(get_client_ip)
 ):
     """
-    Permite al Fiscalizador CGR realizar el refrendo de solicitudes de alto monto.
+    Permite refrendo de CGR.
     """
     try:
-        if current_user.rol.nombre_rol != "Fiscalizador CGR":
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acceso denegado")
+        if not has_permission(current_user, 'FISCALIZACION_VIEW') or not has_permission(current_user, 'MISSION_APPROVE'):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Permisos requeridos: FISCALIZACION_VIEW y MISSION_APPROVE"
+            )
         
         return workflow_service.execute_workflow_action(
             mission_id=mission_id,
@@ -349,13 +628,14 @@ async def process_payment(
     client_ip: str = Depends(get_client_ip)
 ):
     """
-    Permite procesar el pago de una solicitud aprobada.
-    Disponible para Analista Tesorería y Custodio Caja Menuda.
+    Permite procesar el pago de una solicitud.
     """
     try:
-        allowed_roles = ["Analista Tesorería", "Custodio Caja Menuda"]
-        if current_user.rol.nombre_rol not in allowed_roles:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acceso denegado")
+        if not has_permission(current_user, 'MISSION_PAYMMENT'):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Permiso requerido: MISSION_PAYMMENT"
+            )
         
         return workflow_service.execute_workflow_action(
             mission_id=mission_id,
@@ -380,11 +660,13 @@ async def confirm_payment(
 ):
     """
     Permite confirmar el pago cuando está pendiente de firma electrónica.
-    Disponible para Analista Tesorería.
     """
     try:
-        if current_user.rol.nombre_rol != "Analista Tesorería":
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acceso denegado")
+        if not has_permission(current_user, 'MISSION_PAYMMENT'):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Permiso requerido: MISSION_PAYMMENT"
+            )
         
         return workflow_service.execute_workflow_action(
             mission_id=mission_id,
@@ -408,8 +690,7 @@ async def return_mission_for_correction(
     mission_id: int,
     request_data: WorkflowActionBase,
     workflow_service: WorkflowService = Depends(get_workflow_service),
-    current_user: Optional[Usuario] = Depends(get_current_user),
-    current_employee: Optional[dict] = Depends(get_current_employee_with_role),
+    current_user = Depends(get_current_user_universal),
     client_ip: str = Depends(get_client_ip)
 ):
     """
@@ -417,14 +698,13 @@ async def return_mission_for_correction(
     Disponible para cualquier rol autorizado en el flujo.
     """
     try:
-        user = current_user if current_user else current_employee
-        if not user:
+        if not current_user:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuario no autenticado")
         
         return workflow_service.execute_workflow_action(
             mission_id=mission_id,
             action="DEVOLVER",
-            user=user,
+            user=current_user,
             request_data=request_data,
             client_ip=client_ip
         )
@@ -435,44 +715,68 @@ async def return_mission_for_correction(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 # ===============================================
-# ENDPOINTS PARA OBTENER PENDIENTES POR ROL
+# ENDPOINT PRINCIPAL PARA OBTENER PENDIENTES
 # ===============================================
-@router.get("/jefe/pendientes")
-async def get_jefe_pendientes(
+
+@router.get("/pendientes")
+async def get_pending_missions(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
     search: Optional[str] = Query(None),
     tipo_mision: Optional[str] = Query(None),
     workflow_service: WorkflowService = Depends(get_workflow_service),
-    user: Union[Usuario, dict] = Depends(get_current_user_universal)
+    current_user = Depends(get_current_user_universal)
 ):
     """
-    Obtiene las solicitudes pendientes de aprobación para jefes inmediatos.
+    Obtiene las solicitudes pendientes según los permisos del usuario.
+    Funciona tanto para usuarios financieros como empleados.
     """
+    print(f"🔍 DEBUG pendientes - INICIO DEL ENDPOINT")
+    print(f"🔍 DEBUG pendientes - current_user: {current_user}")
+    print(f"🔍 DEBUG pendientes - type(current_user): {type(current_user)}")
+    
     try:
-        # Debug logging detallado
-        print(f"DEBUG - Usuario recibido: {user}")
-        print(f"DEBUG - Tipo de usuario: {type(user)}")
-        
-        if isinstance(user, dict):
-            print(f"DEBUG - Todos los datos del user dict: {user}")
-            role_name = user.get('role_name', '')
-            is_department_head = user.get('is_department_head', False)
-            print(f"DEBUG - role_name: '{role_name}'")
-            print(f"DEBUG - is_department_head: {is_department_head}")
-            print(f"DEBUG - id_rol: {user.get('id_rol')}")
-        
-        # Verificar si el usuario es jefe inmediato
-        if not is_jefe_inmediato(user):
-            role_name = get_role_name(user)
-            is_dept_head = user.get("is_department_head", False) if isinstance(user, dict) else False
-            
+        if not current_user:
+            print(f"🔍 DEBUG pendientes - Usuario no autenticado")
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Solo los jefes de departamento pueden acceder a esta cola. "
-                       f"Rol actual: '{role_name}', Es jefe: {is_dept_head}, Datos: {user}"
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Usuario no autenticado"
             )
         
+        print(f"🔍 DEBUG pendientes - Usuario autenticado: {type(current_user)}")
+        
+        # Verificar permisos según el tipo de usuario
+        if isinstance(current_user, dict):
+            print(f"🔍 DEBUG - Es empleado, verificando permisos...")
+            print(f"🔍 DEBUG - is_department_head: {current_user.get('is_department_head', False)}")
+            print(f"🔍 DEBUG - permisos_usuario: {current_user.get('permisos_usuario', {})}")
+            
+            # Verificar permisos específicos
+            mission_approve = has_permission(current_user, 'MISSION_APPROVE')
+            gestion_view = has_permission(current_user, 'GESTION_SOLICITUDES_VIEW')
+            is_jefe = is_jefe_inmediato(current_user)
+            
+            print(f"🔍 DEBUG - MISSION_APPROVE: {mission_approve}")
+            print(f"🔍 DEBUG - GESTION_SOLICITUDES_VIEW: {gestion_view}")
+            print(f"🔍 DEBUG - is_jefe_inmediato: {is_jefe}")
+            
+            # Para empleados, verificar si es jefe inmediato
+            if not is_jefe:
+                print(f"🔍 DEBUG - NO ES JEFE INMEDIATO - Rechazando acceso")
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Solo los jefes de departamento pueden acceder a las solicitudes pendientes"
+                )
+        else:
+            # Para usuarios financieros, verificar permiso específico
+            if not has_permission(current_user, 'GESTION_SOLICITUDES_VIEW'):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Permiso requerido: GESTION_SOLICITUDES_VIEW"
+                )
+        
+        print(f"🔍 DEBUG - Permiso verificado correctamente")
+        
         filters = {
             "page": page,
             "size": size,
@@ -480,167 +784,39 @@ async def get_jefe_pendientes(
             "tipo_mision": tipo_mision
         }
         
-        return workflow_service.get_pending_missions_by_role("Jefe Inmediato", user, filters)
+        print(f"🔍 DEBUG - Llamando a workflow_service.get_pending_missions_by_permission")
+        result = workflow_service.get_pending_missions_by_permission(current_user, filters)
+        print(f"🔍 DEBUG - Resultado obtenido: {len(result.get('items', []))} misiones")
+        return result
         
     except HTTPException:
+        print(f"🔍 DEBUG - HTTPException capturada y re-lanzada")
         raise
-    except (WorkflowException, PermissionException) as e:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
     except Exception as e:
-        print(f"DEBUG - Error: {str(e)}")
+        print(f"🔍 ERROR en pendientes: {str(e)}")
         import traceback
-        print(f"DEBUG - Traceback: {traceback.format_exc()}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error interno: {str(e)}")
-
-@router.get("/tesoreria/pendientes")
-async def get_tesoreria_pendientes(
-    page: int = Query(1, ge=1),
-    size: int = Query(20, ge=1, le=100),
-    search: Optional[str] = Query(None),
-    tipo_mision: Optional[str] = Query(None),
-    workflow_service: WorkflowService = Depends(get_workflow_service),
-    current_user: Usuario = Depends(get_current_user)
-):
-    """
-    Obtiene las solicitudes pendientes de revisión para Analista Tesorería.
-    """
-    try:
-        if current_user.rol.nombre_rol != "Analista Tesorería":
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acceso denegado")
-        
-        filters = {
-            "page": page,
-            "size": size,
-            "search": search,
-            "tipo_mision": tipo_mision
-        }
-        
-        return workflow_service.get_pending_missions_by_role("Analista Tesorería", current_user, filters)
-        
-    except (WorkflowException, PermissionException) as e:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
-    except Exception as e:
+        print(f"🔍 ERROR traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
-@router.get("/presupuesto/pendientes")
-async def get_presupuesto_pendientes(
-    page: int = Query(1, ge=1),
-    size: int = Query(20, ge=1, le=100),
-    search: Optional[str] = Query(None),
-    tipo_mision: Optional[str] = Query(None),
-    workflow_service: WorkflowService = Depends(get_workflow_service),
-    current_user: Usuario = Depends(get_current_user)
-):
-    """
-    Obtiene las solicitudes pendientes de asignación presupuestaria.
-    """
-    try:
-        if current_user.rol.nombre_rol != "Analista Presupuesto":
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acceso denegado")
-        
-        filters = {
-            "page": page,
-            "size": size,
-            "search": search,
-            "tipo_mision": tipo_mision
-        }
-        
-        return workflow_service.get_pending_missions_by_role("Analista Presupuesto", current_user, filters)
-        
-    except (WorkflowException, PermissionException) as e:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-
-@router.get("/contabilidad/pendientes")
-async def get_contabilidad_pendientes(
-    page: int = Query(1, ge=1),
-    size: int = Query(20, ge=1, le=100),
-    search: Optional[str] = Query(None),
-    tipo_mision: Optional[str] = Query(None),
-    workflow_service: WorkflowService = Depends(get_workflow_service),
-    current_user: Usuario = Depends(get_current_user)
-):
-    """
-    Obtiene las solicitudes pendientes de procesamiento contable.
-    """
-    try:
-        if current_user.rol.nombre_rol != "Analista Contabilidad":
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acceso denegado")
-        
-        filters = {
-            "page": page,
-            "size": size,
-            "search": search,
-            "tipo_mision": tipo_mision
-        }
-        
-        return workflow_service.get_pending_missions_by_role("Analista Contabilidad", current_user, filters)
-        
-    except (WorkflowException, PermissionException) as e:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-
-@router.get("/finanzas/pendientes")
-async def get_finanzas_pendientes(
-    page: int = Query(1, ge=1),
-    size: int = Query(20, ge=1, le=100),
-    search: Optional[str] = Query(None),
-    tipo_mision: Optional[str] = Query(None),
-    workflow_service: WorkflowService = Depends(get_workflow_service),
-    current_user: Usuario = Depends(get_current_user)
-):
-    """
-    Obtiene las solicitudes pendientes de aprobación final del Director Finanzas.
-    """
-    try:
-        if current_user.rol.nombre_rol != "Director Finanzas":
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acceso denegado")
-        
-        filters = {
-            "page": page,
-            "size": size,
-            "search": search,
-            "tipo_mision": tipo_mision
-        }
-        
-        return workflow_service.get_pending_missions_by_role("Director Finanzas", current_user, filters)
-        
-    except (WorkflowException, PermissionException) as e:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-
-@router.get("/cgr/pendientes")
-async def get_cgr_pendientes(
-    page: int = Query(1, ge=1),
-    size: int = Query(20, ge=1, le=100),
-    search: Optional[str] = Query(None),
-    tipo_mision: Optional[str] = Query(None),
-    workflow_service: WorkflowService = Depends(get_workflow_service),
-    current_user: Usuario = Depends(get_current_user)
-):
-    """
-    Obtiene las solicitudes pendientes de refrendo CGR.
-    """
-    try:
-        if current_user.rol.nombre_rol != "Fiscalizador CGR":
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acceso denegado")
-        
-        filters = {
-            "page": page,
-            "size": size,
-            "search": search,
-            "tipo_mision": tipo_mision
-        }
-        
-        return workflow_service.get_pending_missions_by_role("Fiscalizador CGR", current_user, filters)
-        
-    except (WorkflowException, PermissionException) as e:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+# ===============================================
+# ENDPOINTS ELIMINADOS - REDUNDANTES CON /pendientes
+# ===============================================
+# Los siguientes endpoints fueron eliminados porque /workflow/pendientes
+# ya maneja todos los tipos de usuario y permisos de forma universal:
+#
+# - /workflow/jefe/pendientes
+# - /workflow/tesoreria/pendientes  
+# - /workflow/presupuesto/pendientes
+# - /workflow/contabilidad/pendientes
+# - /workflow/finanzas/pendientes
+# - /workflow/cgr/pendientes
+# - /workflow/custodio/pendientes
+#
+# Todos estos endpoints son redundantes porque /workflow/pendientes:
+# ✅ Funciona para empleados y usuarios financieros
+# ✅ Verifica permisos automáticamente según el rol
+# ✅ Retorna las misiones correctas según los permisos del usuario
+# ✅ Es más simple y mantenible
 
 # ===============================================
 # ENDPOINTS DE CONSULTA Y UTILIDADES
@@ -654,12 +830,13 @@ async def get_budget_items_catalog(
 ):
     """
     Obtiene el catálogo de partidas presupuestarias disponibles.
-    Solo disponible para roles financieros.
     """
     try:
-        financial_roles = ["Analista Presupuesto", "Director Finanzas", "Administrador Sistema"]
-        if current_user.rol.nombre_rol not in financial_roles:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acceso denegado")
+        if not has_permission(current_user, 'PRESUPUESTO_VIEW'):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Permiso requerido: PRESUPUESTO_VIEW"
+            )
         
         partidas = workflow_service.get_budget_items_catalog()
         
@@ -675,39 +852,36 @@ async def get_budget_items_catalog(
         
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-    
 
 @router.get("/missions/{mission_id}/next-states")
 async def get_next_possible_states(
-   mission_id: int,
-   workflow_service: WorkflowService = Depends(get_workflow_service),
-   current_user: Optional[Usuario] = Depends(get_current_user),
-   current_employee: Optional[dict] = Depends(get_current_employee_with_role)
+    mission_id: int,
+    workflow_service: WorkflowService = Depends(get_workflow_service),
+    current_user = Depends(get_current_user_universal)
 ):
-   """
-   Obtiene los posibles próximos estados para una misión específica.
-   """
-   try:
-       user = current_user if current_user else current_employee
-       if not user:
-           raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuario no autenticado")
-       
-       actions = workflow_service.get_available_actions(mission_id, user)
-       return {
-           "mission_id": mission_id,
-           "current_state": actions.estado_actual,
-           "next_possible_states": [
-               {
-                   "action": accion["accion"],
-                   "next_state": accion["estado_destino"],
-                   "description": accion["descripcion"]
-               }
-               for accion in actions.acciones_disponibles
-           ]
-       }
-       
-   except Exception as e:
-       raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+    """
+    Obtiene los posibles próximos estados para una misión específica.
+    """
+    try:
+        if not current_user:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuario no autenticado")
+        
+        actions = workflow_service.get_available_actions(mission_id, current_user)
+        return {
+            "mission_id": mission_id,
+            "current_state": actions.estado_actual,
+            "next_possible_states": [
+                {
+                    "action": accion["accion"],
+                    "next_state": accion["estado_destino"],
+                    "description": accion["descripcion"]
+                }
+                for accion in actions.acciones_disponibles
+            ]
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 # ===============================================
 # ENDPOINTS DE INFORMACIÓN DEL SISTEMA
@@ -715,267 +889,139 @@ async def get_next_possible_states(
 
 @router.get("/info/workflow-summary")
 async def get_workflow_system_info(
-   current_user: Usuario = Depends(get_current_user),
-   db: Session = Depends(get_db_financiero)
-):
-   """
-   Obtiene información general del sistema de workflow.
-   Solo disponible para administradores.
-   """
-   try:
-       if current_user.rol.nombre_rol != "Administrador Sistema":
-           raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acceso denegado")
-       
-       # Estadísticas básicas del sistema
-       total_estados = db.query(EstadoFlujo).count()
-       total_transiciones = db.query(TransicionFlujo).filter(TransicionFlujo.es_activa == True).count()
-       
-       return {
-           "total_estados": total_estados,
-           "total_transiciones_activas": total_transiciones,
-           "tipos_flujo_soportados": ["VIATICOS", "CAJA_MENUDA", "AMBOS"],
-           "roles_con_acceso": [
-               "Solicitante", "Jefe Inmediato", "Analista Tesorería",
-               "Analista Presupuesto", "Analista Contabilidad", 
-               "Director Finanzas", "Fiscalizador CGR", "Custodio Caja Menuda"
-           ]
-       }
-       
-   except Exception as e:
-       raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-
-# ===============================================
-# ENDPOINT ADICIONAL PARA DEBUG
-# ===============================================
-
-@router.get("/debug/user-info")
-async def debug_user_info(
-   current_user: Optional[Usuario] = Depends(get_current_user),
-   current_employee: Optional[dict] = Depends(get_current_employee_with_role)
-):
-   """
-   Endpoint temporal para debug - muestra información del usuario actual.
-   """
-   try:
-       user = current_user if current_user else current_employee
-       
-       if isinstance(user, dict):
-           return {
-               "user_type": "employee",
-               "data": user,
-               "role_name": user.get("role_name"),
-               "is_department_head": user.get("is_department_head"),
-               "processed_role": get_role_name(user),
-               "is_jefe_check": is_jefe_inmediato(user)
-           }
-       elif isinstance(user, Usuario):
-           return {
-               "user_type": "financial_user",
-               "username": user.login_username,
-               "role_name": user.rol.nombre_rol,
-               "processed_role": get_role_name(user),
-               "is_jefe_check": is_jefe_inmediato(user)
-           }
-       else:
-           return {
-               "user_type": "none",
-               "message": "No user authenticated"
-           }
-           
-   except Exception as e:
-       return {
-           "error": str(e),
-           "user_data": str(user) if 'user' in locals() else "No user"
-       }
-@router.post("/missions/{mission_id}/jefe/devolver", response_model=WorkflowTransitionResponse)
-async def jefe_return_for_correction(
-    mission_id: int,
-    request_data: JefeReturnRequest,
-    workflow_service: WorkflowService = Depends(get_workflow_service),
-    current_employee: dict = Depends(get_current_employee_with_role),
-    client_ip: str = Depends(get_client_ip),
-    db: Session = Depends(get_db_financiero)
-):
-    """
-    Permite al jefe inmediato devolver una solicitud para corrección.
-    """
-    try:
-        if not is_jefe_inmediato(current_employee):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Solo los jefes de departamento pueden devolver solicitudes"
-            )
-        
-        # Obtener y validar la misión
-        mision = workflow_service._get_mission_with_validation(mission_id, current_employee)
-        workflow_service._validate_employee_supervision(mision, current_employee)
-        
-        estado_anterior = mision.estado_flujo.nombre_estado
-        estado_anterior_id = mision.id_estado_flujo  # ← Usar el ID actual directamente
-        
-        # Cambiar estado directamente
-        mision.id_estado_flujo = 8  # DEVUELTO_CORRECCION
-        
-        # Crear historial
-        historial = HistorialFlujo(
-            id_mision=mision.id_mision,
-            id_usuario_accion=1,  # Usuario sistema para empleados
-            id_estado_anterior=estado_anterior_id,  # ← Usar el ID que ya tenemos
-            id_estado_nuevo=8,
-            tipo_accion="DEVOLVER",
-            comentarios=request_data.comentarios,
-            datos_adicionales={
-                'motivo': request_data.motivo,
-                'observaciones_correccion': getattr(request_data, 'observaciones_correccion', None),
-                'jefe_cedula': current_employee.get('cedula'),
-                'jefe_nombre': current_employee.get('apenom')
-            },
-            ip_usuario=client_ip
-        )
-        
-        db.add(historial)
-        db.commit()
-        
-        return WorkflowTransitionResponse(
-            success=True,
-            message=f'Solicitud devuelta para corrección por {current_employee.get("apenom", "Jefe Inmediato")}',
-            mission_id=mission_id,
-            estado_anterior=estado_anterior,
-            estado_nuevo="DEVUELTO_CORRECCION",
-            accion_ejecutada="DEVOLVER",
-            requiere_accion_adicional=True,
-            datos_transicion={
-                'motivo': request_data.motivo,
-                'observaciones_correccion': getattr(request_data, 'observaciones_correccion', None)
-            }
-        )
-        
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-
-@router.post("/missions/{mission_id}/jefe/aprobar-directo", response_model=WorkflowTransitionResponse)
-async def jefe_approve_direct_payment(
-    mission_id: int,
-    request_data: JefeDirectApprovalRequest,
-    workflow_service: WorkflowService = Depends(get_workflow_service),
-    current_employee: dict = Depends(get_current_employee_with_role),
-    client_ip: str = Depends(get_client_ip),
-    db: Session = Depends(get_db_financiero)
-):
-    """
-    Permite al jefe inmediato aprobar directamente para pago.
-    """
-    try:
-        if not is_jefe_inmediato(current_employee):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Solo los jefes de departamento pueden aprobar solicitudes"
-            )
-        
-        # Obtener y validar la misión
-        mision = workflow_service._get_mission_with_validation(mission_id, current_employee)
-        workflow_service._validate_employee_supervision(mision, current_employee)
-        
-        estado_anterior = mision.estado_flujo.nombre_estado
-        estado_anterior_id = mision.id_estado_flujo  # ← Usar el ID actual directamente
-        
-        # Actualizar monto si se especifica
-        if hasattr(request_data, 'monto_aprobado') and request_data.monto_aprobado:
-            mision.monto_aprobado = request_data.monto_aprobado
-        else:
-            mision.monto_aprobado = mision.monto_total_calculado
-        
-        # Cambiar estado directamente
-        mision.id_estado_flujo = 6  # APROBADO_PARA_PAGO
-        
-        # Crear historial
-        historial = HistorialFlujo(
-            id_mision=mision.id_mision,
-            id_usuario_accion=1,  # Usuario sistema para empleados
-            id_estado_anterior=estado_anterior_id,  # ← Usar el ID que ya tenemos
-            id_estado_nuevo=6,
-            tipo_accion="APROBAR_DIRECTO",
-            comentarios=request_data.comentarios,
-            datos_adicionales={
-                'justificacion': getattr(request_data, 'justificacion', 'Aprobación directa'),
-                'es_emergencia': getattr(request_data, 'es_emergencia', False),
-                'monto_aprobado': float(mision.monto_aprobado),
-                'jefe_cedula': current_employee.get('cedula'),
-                'jefe_nombre': current_employee.get('apenom')
-            },
-            ip_usuario=client_ip
-        )
-        
-        db.add(historial)
-        db.commit()
-        
-        return WorkflowTransitionResponse(
-            success=True,
-            message=f'Solicitud aprobada directamente para pago por {current_employee.get("apenom", "Jefe Inmediato")}',
-            mission_id=mission_id,
-            estado_anterior=estado_anterior,
-            estado_nuevo="APROBADO_PARA_PAGO",
-            accion_ejecutada="APROBAR_DIRECTO",
-            requiere_accion_adicional=False,
-            datos_transicion={
-                'justificacion': getattr(request_data, 'justificacion', 'Aprobación directa'),
-                'monto_aprobado': float(mision.monto_aprobado)
-            }
-        )
-        
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-
-
-@router.get("/custodio/pendientes")
-async def get_custodio_pendientes(
-    request: Request,
-    page: int = Query(1, ge=1),
-    size: int = Query(20, ge=1, le=100),
-    search: Optional[str] = Query(None),
-    tipo_mision: Optional[str] = Query(None),
-    workflow_service: WorkflowService = Depends(get_workflow_service),
     current_user: Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db_financiero)
 ):
     """
-    Obtiene las solicitudes de CAJA MENUDA pendientes de pago para Custodio Caja Menuda.
+    Obtiene información general del sistema de workflow.
+    Solo disponible para administradores.
     """
     try:
-        # 🔍 DEBUG - Ver el rol exacto
-        print(f"🔍 ROL EXACTO: '{current_user.rol.nombre_rol}'")
-        print(f"🔍 LONGITUD: {len(current_user.rol.nombre_rol)}")
-        print(f"🔍 USUARIO: {current_user.login_username}")
-        
-        # ✅ SOLUCIÓN: Usar .strip() y comparación flexible
-        rol_usuario = current_user.rol.nombre_rol.strip()
-        
-        if rol_usuario != "Custodio Caja Menuda":
+        # Verificar permisos de administrador
+        if not has_permission(current_user, 'SYSTEM_CONFIG'):
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN, 
-                detail=f"Acceso denegado - Rol actual: '{rol_usuario}', se requiere 'Custodio Caja Menuda'"
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Permiso requerido: SYSTEM_CONFIG"
             )
         
-        filters = {
-            "page": page,
-            "size": size,
-            "search": search,
-            "tipo_mision": tipo_mision
+        # Estadísticas básicas del sistema
+        total_estados = db.query(EstadoFlujo).count()
+        total_transiciones = db.query(TransicionFlujo).filter(TransicionFlujo.es_activa == True).count()
+        
+        return {
+            "total_estados": total_estados,
+            "total_transiciones_activas": total_transiciones,
+            "tipos_flujo_soportados": ["VIATICOS", "CAJA_MENUDA", "AMBOS"],
+            "permisos_workflow": [
+                "MISSION_APPROVE", "MISSION_REJECT", "MISSION_PAYMMENT",
+                "GESTION_SOLICITUDES_VIEW", "PAGOS_VIEW", "PRESUPUESTO_VIEW",
+                "CONTABILIDAD_VIEW", "FISCALIZACION_VIEW"
+            ]
         }
         
-        result = workflow_service.get_pending_missions_by_role("Custodio Caja Menuda", current_user, filters)
-        
-        print(f"🔍 Resultado obtenido: {len(result.get('items', []))} misiones")
-        return result
-        
-    except HTTPException:
-        raise
     except Exception as e:
-        print(f"🔍 Error: {str(e)}")
-        import traceback
-        print(f"🔍 Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
-# Agregar estos endpoints al final del archivo employee_missions.py
+# ===============================================
+# ENDPOINT DE DEBUG
+# ===============================================
 
+@router.get("/debug/user-permissions")
+async def debug_user_permissions(
+    current_user = Depends(get_current_user_universal)
+):
+    """
+    Endpoint de debug para ver permisos del usuario.
+    """
+    try:
+        if not current_user:
+            return {"error": "No user authenticated"}
+        
+        if isinstance(current_user, dict):
+            return {
+                "user_type": "employee",
+                "permissions": current_user.get('permisos_usuario', {}),
+                "is_department_head": current_user.get('is_department_head', False),
+                "relevant_permissions": {
+                    "MISSION_APPROVE": has_permission(current_user, 'MISSION_APPROVE'),
+                    "MISSION_REJECT": has_permission(current_user, 'MISSION_REJECT'),
+                    "MISSION_PAYMMENT": has_permission(current_user, 'MISSION_PAYMMENT'),
+                    "GESTION_SOLICITUDES_VIEW": has_permission(current_user, 'GESTION_SOLICITUDES_VIEW'),
+                    "PAGOS_VIEW": has_permission(current_user, 'PAGOS_VIEW'),
+                    "PRESUPUESTO_VIEW": has_permission(current_user, 'PRESUPUESTO_VIEW'),
+                    "CONTABILIDAD_VIEW": has_permission(current_user, 'CONTABILIDAD_VIEW'),
+                    "FISCALIZACION_VIEW": has_permission(current_user, 'FISCALIZACION_VIEW')
+                },
+                "is_jefe_inmediato": is_jefe_inmediato(current_user),
+                "permission_mapping_test": {
+                    "misiones.aprobar": current_user.get('permisos_usuario', {}).get('misiones', {}).get('aprobar', False),
+                    "gestion_solicitudes.ver": current_user.get('permisos_usuario', {}).get('gestion_solicitudes', {}).get('ver', False),
+                    "reportes.ver": current_user.get('permisos_usuario', {}).get('reportes', {}).get('ver', False)
+                }
+            }
+        else:
+            return {
+                "user_type": "financial_user",
+                "username": current_user.login_username,
+                "permissions": getattr(current_user, 'permisos_usuario', {}),
+                "relevant_permissions": {
+                    "MISSION_APPROVE": has_permission(current_user, 'MISSION_APPROVE'),
+                    "MISSION_REJECT": has_permission(current_user, 'MISSION_REJECT'),
+                    "MISSION_PAYMMENT": has_permission(current_user, 'MISSION_PAYMMENT'),
+                    "GESTION_SOLICITUDES_VIEW": has_permission(current_user, 'GESTION_SOLICITUDES_VIEW'),
+                    "PAGOS_VIEW": has_permission(current_user, 'PAGOS_VIEW'),
+                    "PRESUPUESTO_VIEW": has_permission(current_user, 'PRESUPUESTO_VIEW'),
+                    "CONTABILIDAD_VIEW": has_permission(current_user, 'CONTABILIDAD_VIEW'),
+                    "FISCALIZACION_VIEW": has_permission(current_user, 'FISCALIZACION_VIEW')
+                },
+                "is_jefe_inmediato": is_jefe_inmediato(current_user)
+            }
+            
+    except Exception as e:
+        return {"error": str(e)}
+
+@router.get("/debug/user-permissions-complete")
+async def debug_user_permissions_complete(
+    current_user: Usuario = Depends(get_current_user)
+):
+    """
+    Debug completo para ver TODOS los atributos del usuario financiero.
+    """
+    try:
+        return {
+            "user_type": "financial_user",
+            "username": current_user.login_username,
+            "user_id": current_user.id_usuario,
+            "all_attributes": [attr for attr in dir(current_user) if not attr.startswith('_')],
+            "permissions_attr_exists": hasattr(current_user, 'permissions'),
+            "permisos_usuario_attr_exists": hasattr(current_user, 'permisos_usuario'),
+            
+            # Intentar acceder a diferentes posibles atributos de permisos
+            "rol_object": {
+                "nombre": current_user.rol.nombre_rol if hasattr(current_user, 'rol') else None,
+                "rol_attributes": [attr for attr in dir(current_user.rol) if not attr.startswith('_')] if hasattr(current_user, 'rol') else []
+            },
+            
+            # Verificar si los permisos están en el rol
+            "rol_permissions": getattr(current_user.rol, 'permissions', None) if hasattr(current_user, 'rol') else None,
+            "rol_permisos": getattr(current_user.rol, 'permisos', None) if hasattr(current_user, 'rol') else None,
+            
+            # Verificar atributos del usuario directamente
+            "user_permissions": getattr(current_user, 'permissions', None),
+            "user_permisos": getattr(current_user, 'permisos', None),
+            "user_permisos_usuario": getattr(current_user, 'permisos_usuario', None),
+            
+            # Intentar acceder a relationships
+            "relationships": {
+                attr: str(getattr(current_user, attr)) 
+                for attr in dir(current_user) 
+                if not attr.startswith('_') and hasattr(current_user, attr)
+            }
+        }
+        
+    except Exception as e:
+        import traceback
+        return {
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }

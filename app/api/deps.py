@@ -154,6 +154,7 @@ def get_current_user_universal(
             is_department_head = payload.get("is_department_head", False)
             managed_departments = payload.get("managed_departments", [])
             id_rol = payload.get("id_rol")
+            permisos_usuario = payload.get("permisos_usuario", {})
             
             if not personal_id or not cedula:
                 raise credentials_exception
@@ -172,7 +173,8 @@ def get_current_user_universal(
                 "managed_departments": managed_departments,
                 "id_rol": id_rol,
                 "role_name": role_name,
-                "user_type": "employee"
+                "user_type": "employee",
+                "permisos_usuario": permisos_usuario
             }
             
             print(f"DEBUG - Employee data: {employee_data}")
@@ -225,6 +227,7 @@ def get_current_employee_with_role(
         is_department_head = payload.get("is_department_head", False)
         managed_departments = payload.get("managed_departments", [])
         id_rol = payload.get("id_rol")
+        permisos_usuario = payload.get("permisos_usuario", {})
         
         if not personal_id or not cedula:
             raise credentials_exception
@@ -243,7 +246,8 @@ def get_current_employee_with_role(
             "managed_departments": managed_departments,
             "id_rol": id_rol,
             "role_name": role_name,
-            "user_type": "employee"
+            "user_type": "employee",
+            "permisos_usuario": permisos_usuario
         }
         
         return employee_data

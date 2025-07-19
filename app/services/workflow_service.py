@@ -23,7 +23,7 @@ from ..services.configuration import ConfigurationService
 class WorkflowService:
     """
     Servicio central para gestionar el flujo de trabajo de misiones.
-    Maneja todas las transiciones de estado dinámicamente.
+    Maneja todas las transiciones de estado dinámicamente usando permisos.
     """
     
     def __init__(self, db_financiero: Session, db_rrhh: Optional[Session] = None):
@@ -62,46 +62,307 @@ class WorkflowService:
         except Exception:
             return default_value
     
+    # ===============================================
+    # MÉTODOS DE VERIFICACIÓN DE PERMISOS
+    # ===============================================
+    
+    def _has_permission(self, user: Union[Usuario, dict], permission_code: str) -> bool:
+        """
+        Verifica si un usuario tiene un permiso específico - VERSIÓN CORREGIDA.
+        """
+        if isinstance(user, dict):
+            # Para empleados, verificar permisos en el dict con estructura anidada
+            permissions = user.get('permisos_usuario', {})
+            
+            # Mapeo de códigos de permisos a la estructura de empleados
+            permission_mapping = {
+                'MISSION_APPROVE': permissions.get('misiones', {}).get('aprobar', False),
+                'MISSION_REJECT': permissions.get('misiones', {}).get('aprobar', False),  # Mismo permiso para aprobar/rechazar
+                'MISSION_CREATE': permissions.get('misiones', {}).get('crear', False),
+                'MISSION_EDIT': permissions.get('misiones', {}).get('editar', False),
+                'MISSION_VIEW': permissions.get('misiones', {}).get('ver', False),
+                'MISSION_PAYMMENT': permissions.get('misiones', {}).get('pagar', False),
+                'GESTION_SOLICITUDES_VIEW': permissions.get('gestion_solicitudes', {}).get('ver', False),
+                'REPORTS_VIEW': permissions.get('reportes', {}).get('ver', False),
+            }
+            
+            result = permission_mapping.get(permission_code, False)
+            print(f"🔍 DEBUG WorkflowService._has_permission - {permission_code}: {result}")
+            return result
+        else:
+            # Para usuarios financieros, usar el método del modelo
+            try:
+                # MÉTODO 1: Usar el método has_permission del modelo
+                if hasattr(user, 'has_permission'):
+                    result = user.has_permission(permission_code)
+                    print(f"🔍 DEBUG WorkflowService._has_permission - {permission_code}: {result}")
+                    return result
+                
+                # MÉTODO 2: Buscar en user.rol.permisos
+                elif hasattr(user, 'rol') and hasattr(user.rol, 'permisos'):
+                    permisos = user.rol.permisos
+                    for permiso in permisos:
+                        if hasattr(permiso, 'codigo') and permiso.codigo == permission_code:
+                            print(f"🔍 DEBUG WorkflowService rol.permisos - {permission_code}: True")
+                            return True
+                    print(f"🔍 DEBUG WorkflowService rol.permisos - {permission_code}: False")
+                    return False
+                
+                print(f"🔍 DEBUG WorkflowService - No se encontró método para verificar permisos")
+                return False
+                
+            except Exception as e:
+                print(f"🔍 ERROR WorkflowService verificando permisos: {e}")
+                return False
+    
+    def _get_user_permissions(self, user: Union[Usuario, dict]) -> Dict[str, Any]:
+        """
+        Obtiene todos los permisos del usuario - VERSIÓN CORREGIDA.
+        """
+        if isinstance(user, dict):
+            return user.get('permisos_usuario', {})
+        else:
+            try:
+                # MÉTODO 1: Usar get_permissions del modelo
+                if hasattr(user, 'get_permissions'):
+                    permisos_list = user.get_permissions()
+                    # Convertir lista a dict (asumiendo que todos son True)
+                    return {permiso: True for permiso in permisos_list}
+                
+                # MÉTODO 2: Extraer códigos de user.rol.permisos
+                elif hasattr(user, 'rol') and hasattr(user.rol, 'permisos'):
+                    permisos_dict = {}
+                    for permiso in user.rol.permisos:
+                        if hasattr(permiso, 'codigo'):
+                            permisos_dict[permiso.codigo] = True
+                    return permisos_dict
+                
+                return {}
+            except Exception as e:
+                print(f"🔍 ERROR WorkflowService obteniendo permisos: {e}")
+                return {}
+    
+    def _can_approve_missions(self, user: Union[Usuario, dict]) -> bool:
+        """Verifica si puede aprobar misiones"""
+        return self._has_permission(user, 'MISSION_APPROVE')
+
+    def _can_reject_missions(self, user: Union[Usuario, dict]) -> bool:
+        """Verifica si puede rechazar misiones"""
+        return self._has_permission(user, 'MISSION_REJECT')
+
+    def _can_pay_missions(self, user: Union[Usuario, dict]) -> bool:
+        """Verifica si puede pagar misiones"""
+        return self._has_permission(user, 'MISSION_PAYMMENT')  # Nota: typo en el código original
+
+    def _can_view_contabilidad(self, user: Union[Usuario, dict]) -> bool:
+        """Verifica si puede ver contabilidad"""
+        return self._has_permission(user, 'CONTABILIDAD_VIEW')
+
+    def _can_view_presupuesto(self, user: Union[Usuario, dict]) -> bool:
+        """Verifica si puede ver presupuesto"""
+        return self._has_permission(user, 'PRESUPUESTO_VIEW')
+
+    def _can_view_fiscalizacion(self, user: Union[Usuario, dict]) -> bool:
+        """Verifica si puede ver fiscalización"""
+        return self._has_permission(user, 'FISCALIZACION_VIEW')
+
+    def _can_view_pagos(self, user: Union[Usuario, dict]) -> bool:
+        """Verifica si puede ver pagos"""
+        return self._has_permission(user, 'PAGOS_VIEW')
+
+    def _can_view_gestion_solicitudes(self, user: Union[Usuario, dict]) -> bool:
+        """Verifica si puede ver gestión de solicitudes"""
+        return self._has_permission(user, 'GESTION_SOLICITUDES_VIEW')
+
+    def _is_jefe_inmediato(self, user: Union[Usuario, dict]) -> bool:
+        """
+        Verifica si el usuario es jefe inmediato.
+        Un jefe puede aprobar si tiene MISSION_APPROVE y es empleado con is_department_head.
+        """
+        if isinstance(user, dict):
+            has_approve_permission = self._has_permission(user, 'MISSION_APPROVE')
+            is_department_head = user.get('is_department_head', False)
+            return has_approve_permission and is_department_head
+        else:
+            # Para usuarios financieros, verificar solo el permiso
+            return self._has_permission(user, 'MISSION_APPROVE')
+        # ===============================================
+    # MÉTODOS PRINCIPALES DEL WORKFLOW
+    # ===============================================
+    
     def get_available_actions(self, mission_id: int, user: Union[Usuario, dict]) -> AvailableActionsResponse:
         """
         Obtiene las acciones disponibles para un usuario en una misión específica.
-        Soporta tanto usuarios financieros como empleados.
+        Soporta tanto usuarios financieros como empleados usando sistema de permisos.
         """
         mision = self._get_mission_with_validation(mission_id, user)
-        
-        # Determinar el rol del usuario
-        if isinstance(user, dict):  # Es empleado
-            user_role_id = user.get('id_rol', 1)
-            user_role_name = user.get('role_name', 'Solicitante')
-        else:  # Es usuario financiero
-            user_role_id = user.id_rol
-            user_role_name = user.rol.nombre_rol
-        
-        # Obtener transiciones disponibles
-        transiciones = self.db.query(TransicionFlujo).filter(
-            and_(
-                TransicionFlujo.id_estado_origen == mision.id_estado_flujo,
-                TransicionFlujo.id_rol_autorizado == user_role_id,
-                TransicionFlujo.es_activa == True
-            )
-        ).all()
+        estado_actual = mision.estado_flujo.nombre_estado
         
         acciones_disponibles = []
-        for trans in transiciones:
-            # Convertir el enum a string para evitar errores de tipado
-            accion_str = trans.tipo_accion.value if hasattr(trans.tipo_accion, 'value') else str(trans.tipo_accion)
-            
-            accion_info = {
-                "accion": accion_str,
-                "estado_destino": trans.estado_destino.nombre_estado,
-                "descripcion": trans.estado_destino.descripcion,
-                "requiere_datos_adicionales": self._requires_additional_data(trans.tipo_accion, user_role_name)
-            }
-            acciones_disponibles.append(accion_info)
+        
+        # ===== LÓGICA BASADA EN PERMISOS Y ESTADO =====
+        
+        if estado_actual == 'BORRADOR' or estado_actual == 'DEVUELTO_CORRECCION':
+            if self._has_permission(user, 'MISSION_CREATE') or self._has_permission(user, 'MISSION_EDIT'):
+                acciones_disponibles.append({
+                    "accion": "ENVIAR",
+                    "estado_destino": "PENDIENTE_JEFE",
+                    "descripcion": "Enviar solicitud para aprobación",
+                    "requiere_datos_adicionales": False
+                })
+        
+        elif estado_actual == 'PENDIENTE_JEFE':
+            if self._is_jefe_inmediato(user):
+                acciones_disponibles.extend([
+                    {
+                        "accion": "APROBAR",
+                        "estado_destino": "PENDIENTE_REVISION_TESORERIA",
+                        "descripcion": "Aprobar solicitud",
+                        "requiere_datos_adicionales": False
+                    },
+                    {
+                        "accion": "APROBAR_DIRECTO",
+                        "estado_destino": "APROBADO_PARA_PAGO",
+                        "descripcion": "Aprobar directamente para pago",
+                        "requiere_datos_adicionales": True
+                    },
+                    {
+                        "accion": "RECHAZAR",
+                        "estado_destino": "RECHAZADO",
+                        "descripcion": "Rechazar solicitud",
+                        "requiere_datos_adicionales": True
+                    },
+                    {
+                        "accion": "DEVOLVER",
+                        "estado_destino": "DEVUELTO_CORRECCION",
+                        "descripcion": "Devolver para corrección",
+                        "requiere_datos_adicionales": True
+                    }
+                ])
+        
+        elif estado_actual == 'PENDIENTE_REVISION_TESORERIA':
+            if self._can_view_pagos(user) and self._can_approve_missions(user):
+                if mision.tipo_mision == TipoMision.CAJA_MENUDA:
+                    # Caja menuda va directo a pago
+                    acciones_disponibles.append({
+                        "accion": "APROBAR",
+                        "estado_destino": "APROBADO_PARA_PAGO",
+                        "descripcion": "Aprobar para pago (Caja Menuda)",
+                        "requiere_datos_adicionales": False
+                    })
+                else:
+                    # Viáticos va a presupuesto
+                    acciones_disponibles.append({
+                        "accion": "APROBAR",
+                        "estado_destino": "PENDIENTE_ASIGNACION_PRESUPUESTO",
+                        "descripcion": "Aprobar y enviar a presupuesto",
+                        "requiere_datos_adicionales": False
+                    })
+                
+                acciones_disponibles.extend([
+                    {
+                        "accion": "RECHAZAR",
+                        "estado_destino": "RECHAZADO",
+                        "descripcion": "Rechazar solicitud",
+                        "requiere_datos_adicionales": True
+                    },
+                    {
+                        "accion": "DEVOLVER",
+                        "estado_destino": "DEVUELTO_CORRECCION",
+                        "descripcion": "Devolver para corrección",
+                        "requiere_datos_adicionales": True
+                    }
+                ])
+        
+        elif estado_actual == 'PENDIENTE_ASIGNACION_PRESUPUESTO':
+            if self._can_view_presupuesto(user) and self._can_approve_missions(user):
+                acciones_disponibles.extend([
+                    {
+                        "accion": "APROBAR",
+                        "estado_destino": "PENDIENTE_CONTABILIDAD",
+                        "descripcion": "Asignar presupuesto y aprobar",
+                        "requiere_datos_adicionales": True  # Requiere partidas
+                    },
+                    {
+                        "accion": "RECHAZAR",
+                        "estado_destino": "RECHAZADO",
+                        "descripcion": "Rechazar por presupuesto",
+                        "requiere_datos_adicionales": True
+                    }
+                ])
+        
+        elif estado_actual == 'PENDIENTE_CONTABILIDAD':
+            if self._can_view_contabilidad(user) and self._can_approve_missions(user):
+                acciones_disponibles.extend([
+                    {
+                        "accion": "APROBAR",
+                        "estado_destino": "PENDIENTE_APROBACION_FINANZAS",
+                        "descripcion": "Procesar contabilidad",
+                        "requiere_datos_adicionales": False
+                    },
+                    {
+                        "accion": "RECHAZAR",
+                        "estado_destino": "RECHAZADO",
+                        "descripcion": "Rechazar por contabilidad",
+                        "requiere_datos_adicionales": True
+                    }
+                ])
+        
+        elif estado_actual == 'PENDIENTE_APROBACION_FINANZAS':
+            if self._can_approve_missions(user):  # Director de Finanzas
+                acciones_disponibles.extend([
+                    {
+                        "accion": "APROBAR",
+                        "estado_destino": "APROBADO_PARA_PAGO",  # O CGR si monto alto
+                        "descripcion": "Aprobación final de finanzas",
+                        "requiere_datos_adicionales": True  # Puede requerir monto
+                    },
+                    {
+                        "accion": "RECHAZAR",
+                        "estado_destino": "RECHAZADO",
+                        "descripcion": "Rechazar por finanzas",
+                        "requiere_datos_adicionales": True
+                    }
+                ])
+        
+        elif estado_actual == 'PENDIENTE_REFRENDO_CGR':
+            if self._can_view_fiscalizacion(user) and self._can_approve_missions(user):
+                acciones_disponibles.extend([
+                    {
+                        "accion": "APROBAR",
+                        "estado_destino": "APROBADO_PARA_PAGO",
+                        "descripcion": "Refrendar por CGR",
+                        "requiere_datos_adicionales": False
+                    },
+                    {
+                        "accion": "RECHAZAR",
+                        "estado_destino": "RECHAZADO",
+                        "descripcion": "Rechazar refrendo CGR",
+                        "requiere_datos_adicionales": True
+                    }
+                ])
+        
+        elif estado_actual == 'APROBADO_PARA_PAGO':
+            if self._can_pay_missions(user):
+                acciones_disponibles.append({
+                    "accion": "PROCESAR_PAGO",
+                    "estado_destino": "PAGADO",
+                    "descripcion": "Procesar pago",
+                    "requiere_datos_adicionales": True  # Requiere datos de pago
+                })
+        
+        elif estado_actual == 'PENDIENTE_FIRMA_ELECTRONICA':
+            if self._can_pay_missions(user):
+                acciones_disponibles.append({
+                    "accion": "CONFIRMAR_PAGO",
+                    "estado_destino": "PAGADO",
+                    "descripcion": "Confirmar pago electrónico",
+                    "requiere_datos_adicionales": False
+                })
         
         return AvailableActionsResponse(
             mission_id=mission_id,
-            estado_actual=mision.estado_flujo.nombre_estado,
+            estado_actual=estado_actual,
             acciones_disponibles=acciones_disponibles,
             puede_editar=self._can_edit_mission(mision, user),
             puede_eliminar=self._can_delete_mission(mision, user)
@@ -127,7 +388,7 @@ class WorkflowService:
         estado_anterior = mision.estado_flujo.nombre_estado
         
         try:
-            # Procesar la acción según el tipo y rol
+            # Procesar la acción según el tipo y permisos
             resultado = self._process_specific_action(
                 mision, transicion, request_data, user, client_ip
             )
@@ -159,39 +420,35 @@ class WorkflowService:
         client_ip: Optional[str]
     ) -> Dict[str, Any]:
         """
-        Procesa acciones específicas según el rol y tipo de acción.
+        Procesa acciones específicas según los permisos y tipo de acción.
         """
         # Normalizar el tipo de acción a string
         accion_str = transicion.tipo_accion.value if hasattr(transicion.tipo_accion, 'value') else str(transicion.tipo_accion)
-        rol_nombre = user.get('role_name') if isinstance(user, dict) else user.rol.nombre_rol
         
-        # Mapeo de procesadores específicos
-        processors = {
-            ('APROBAR', 'Jefe Inmediato'): self._process_jefe_approval,
-            ('RECHAZAR', 'Jefe Inmediato'): self._process_jefe_rejection,
-            ('APROBAR', 'Analista Tesorería'): self._process_tesoreria_or_payment,
-            ('APROBAR', 'Analista Presupuesto'): self._process_presupuesto_approval,
-            ('APROBAR', 'Analista Contabilidad'): self._process_contabilidad_approval,
-            ('APROBAR', 'Director Finanzas'): self._process_finanzas_approval,
-            ('APROBAR', 'Fiscalizador CGR'): self._process_cgr_approval,
-            ('APROBAR', 'Custodio Caja Menuda'): self._process_payment,
-            ('DEVOLVER', '*'): self._process_return_for_correction,
-            ('RECHAZAR', '*'): self._process_rejection,
-        }
+        # Determinar el tipo de procesador basado en permisos y estado
+        estado_actual = mision.estado_flujo.nombre_estado
         
-        # Buscar procesador específico
-        processor_key = (accion_str, rol_nombre)
-        processor = processors.get(processor_key)
-        
-        # Si no hay procesador específico, buscar genérico
-        if not processor:
-            processor = processors.get((accion_str, '*'))
-        
-        if not processor:
-            raise WorkflowException(f"No hay procesador definido para {accion_str} - {rol_nombre}")
-        
-        # Ejecutar el procesador específico
-        resultado = processor(mision, transicion, request_data, user)
+        if accion_str == 'APROBAR':
+            if estado_actual == 'PENDIENTE_JEFE':
+                return self._process_jefe_approval(mision, transicion, request_data, user)
+            elif estado_actual == 'PENDIENTE_REVISION_TESORERIA':
+                return self._process_tesoreria_approval(mision, transicion, request_data, user)
+            elif estado_actual == 'PENDIENTE_ASIGNACION_PRESUPUESTO':
+                return self._process_presupuesto_approval(mision, transicion, request_data, user)
+            elif estado_actual == 'PENDIENTE_CONTABILIDAD':
+                return self._process_contabilidad_approval(mision, transicion, request_data, user)
+            elif estado_actual == 'PENDIENTE_APROBACION_FINANZAS':
+                return self._process_finanzas_approval(mision, transicion, request_data, user)
+            elif estado_actual == 'PENDIENTE_REFRENDO_CGR':
+                return self._process_cgr_approval(mision, transicion, request_data, user)
+            elif estado_actual == 'APROBADO_PARA_PAGO':
+                return self._process_payment(mision, transicion, request_data, user)
+            elif estado_actual == 'PENDIENTE_FIRMA_ELECTRONICA':
+                return self._process_payment_confirmation(mision, transicion, request_data, user)
+        elif accion_str == 'RECHAZAR':
+            return self._process_rejection(mision, transicion, request_data, user)
+        elif accion_str == 'DEVOLVER':
+            return self._process_return_for_correction(mision, transicion, request_data, user)
         
         # Cambiar estado de la misión
         mision.id_estado_flujo = transicion.id_estado_destino
@@ -199,7 +456,10 @@ class WorkflowService:
         # Registrar en historial
         self._create_history_record(mision, transicion, request_data, user, client_ip)
         
-        return resultado
+        return {
+            'message': f'Acción {accion_str} ejecutada exitosamente',
+            'datos_adicionales': {}
+        }
     
     def _process_jefe_approval(
         self, 
@@ -238,31 +498,6 @@ class WorkflowService:
                 'jefe_cedula': user.get('cedula')
             }
         }
-    
-    def _process_tesoreria_or_payment(
-        self, 
-        mision: Mision, 
-        transicion: TransicionFlujo, 
-        request_data: WorkflowActionBase,
-        user: Usuario
-    ) -> Dict[str, Any]:
-        """Procesa aprobación de tesorería o procesamiento/confirmación de pago"""
-        estado_actual = mision.estado_flujo.nombre_estado
-        
-        if estado_actual == 'PENDIENTE_REVISION_TESORERIA':
-            # Es una aprobación normal de tesorería
-            return self._process_tesoreria_approval(mision, transicion, request_data, user)
-        elif estado_actual == 'APROBADO_PARA_PAGO':
-            # Es un procesamiento de pago
-            if isinstance(request_data, PaymentProcessRequest):
-                return self._process_payment(mision, transicion, request_data, user)
-            else:
-                raise WorkflowException("Para procesar pago se requieren datos de PaymentProcessRequest")
-        elif estado_actual == 'PENDIENTE_FIRMA_ELECTRONICA':
-            # Es una confirmación de pago
-            return self._process_payment_confirmation(mision, transicion, request_data, user)
-        else:
-            raise WorkflowException(f"Estado {estado_actual} no válido para Analista Tesorería")
     
     def _process_tesoreria_approval(
         self, 
@@ -453,10 +688,9 @@ class WorkflowService:
     ) -> Dict[str, Any]:
         """Procesa el pago de la misión"""
 
-        # ✅ SOLUCIÓN: No modificar la transición, solo determinar el estado final
+        # Determinar el próximo estado basado en el método de pago
         estado_destino_final = None
 
-        # Determinar el próximo estado basado en el método de pago
         if request_data.metodo_pago == 'EFECTIVO':
             # Para efectivo, ir directo a PAGADO
             estado_pagado = self._states_cache.get('PAGADO')
@@ -477,8 +711,8 @@ class WorkflowService:
         mision.id_estado_flujo = estado_destino_final
 
         # Actualizar datos de pago en la misión
-        mision.monto_pagado = mision.monto_aprobado
-        mision.fecha_pago = request_data.fecha_pago or datetime.now()
+        mision.monto_aprobado = mision.monto_total_calculado
+        fecha_pago = request_data.fecha_pago or datetime.now()
 
         # Crear historial manualmente con los estados correctos
         user_id = user.id_usuario if isinstance(user, Usuario) else 1
@@ -493,12 +727,12 @@ class WorkflowService:
             datos_adicionales={
                 'procesado_por': user.login_username,
                 'metodo_pago': request_data.metodo_pago,
-                'monto_pagado': float(mision.monto_pagado),
+                'monto_pagado': float(mision.monto_aprobado),
                 'numero_transaccion': getattr(request_data, 'numero_transaccion', None),
                 'banco_origen': getattr(request_data, 'banco_origen', None),
-                'fecha_pago': mision.fecha_pago.isoformat() if mision.fecha_pago else None
+                'fecha_pago': fecha_pago.isoformat() if fecha_pago else None
             },
-            ip_usuario=None  # Se pasará desde el endpoint
+            ip_usuario=None
         )
 
         self.db.add(historial)
@@ -507,7 +741,7 @@ class WorkflowService:
         datos_adicionales = {
             'procesado_por': user.login_username,
             'metodo_pago': request_data.metodo_pago,
-            'monto_pagado': float(mision.monto_pagado)
+            'monto_pagado': float(mision.monto_aprobado)
         }
 
         if hasattr(request_data, 'numero_transaccion') and request_data.numero_transaccion:
@@ -516,8 +750,8 @@ class WorkflowService:
         if hasattr(request_data, 'banco_origen') and request_data.banco_origen:
             datos_adicionales['banco_origen'] = request_data.banco_origen
 
-        if mision.fecha_pago:
-            datos_adicionales['fecha_pago'] = mision.fecha_pago.isoformat()
+        if fecha_pago:
+            datos_adicionales['fecha_pago'] = fecha_pago.isoformat()
 
         # Mensaje según el método de pago
         mensaje = f'Pago procesado exitosamente vía {request_data.metodo_pago}'
@@ -589,72 +823,105 @@ class WorkflowService:
     
     def get_workflow_states_by_role(self, user: Union[Usuario, dict]) -> List[WorkflowStateInfo]:
         """
-        Obtiene los estados de workflow relevantes para un rol específico
+        Obtiene los estados de workflow relevantes según los permisos del usuario
         """
-        user_role_id = user.get('id_rol') if isinstance(user, dict) else user.id_rol
+        permissions = self._get_user_permissions(user)
         
-        # Obtener estados donde el usuario puede tomar acciones
-        transiciones = self.db.query(TransicionFlujo).filter(
-            and_(
-                TransicionFlujo.id_rol_autorizado == user_role_id,
-                TransicionFlujo.es_activa == True
-            )
-        ).all()
+        # Obtener estados donde el usuario puede tomar acciones basado en permisos
+        estados_relevantes = []
         
-        estado_ids = list(set([t.id_estado_origen for t in transiciones]))
+        if self._is_jefe_inmediato(user):
+            estados_relevantes.append('PENDIENTE_JEFE')
         
+        if self._can_view_pagos(user) and self._can_approve_missions(user):
+            estados_relevantes.extend(['PENDIENTE_REVISION_TESORERIA', 'PENDIENTE_FIRMA_ELECTRONICA'])
+        
+        if self._can_view_presupuesto(user) and self._can_approve_missions(user):
+            estados_relevantes.append('PENDIENTE_ASIGNACION_PRESUPUESTO')
+        
+        if self._can_view_contabilidad(user) and self._can_approve_missions(user):
+            estados_relevantes.append('PENDIENTE_CONTABILIDAD')
+        
+        if self._can_approve_missions(user):
+            estados_relevantes.append('PENDIENTE_APROBACION_FINANZAS')
+        
+        if self._can_view_fiscalizacion(user) and self._can_approve_missions(user):
+            estados_relevantes.append('PENDIENTE_REFRENDO_CGR')
+        
+        if self._can_pay_missions(user):
+            estados_relevantes.append('APROBADO_PARA_PAGO')
+        
+        # Obtener objetos EstadoFlujo
         estados = self.db.query(EstadoFlujo).filter(
-            EstadoFlujo.id_estado_flujo.in_(estado_ids)
+            EstadoFlujo.nombre_estado.in_(estados_relevantes)
         ).order_by(EstadoFlujo.orden_flujo).all()
         
         estados_info = []
         for estado in estados:
-            # Normalizar acciones a strings
+            # Determinar acciones posibles basado en permisos
             acciones = []
-            for t in transiciones:
-                if t.id_estado_origen == estado.id_estado_flujo:
-                    accion_str = t.tipo_accion.value if hasattr(t.tipo_accion, 'value') else str(t.tipo_accion)
-                    acciones.append(accion_str)
-           
+            if self._can_approve_missions(user):
+                acciones.append("APROBAR")
+            if self._can_reject_missions(user):
+                acciones.append("RECHAZAR")
+            if self._can_pay_missions(user) and estado.nombre_estado == 'APROBADO_PARA_PAGO':
+                acciones.append("PROCESAR_PAGO")
+            
             estados_info.append(WorkflowStateInfo(
-               id_estado=estado.id_estado_flujo,
-               nombre_estado=estado.nombre_estado,
-               descripcion=estado.descripcion or "",
-               es_estado_final=estado.es_estado_final,
-               tipo_flujo=estado.tipo_flujo.value if hasattr(estado.tipo_flujo, 'value') else str(estado.tipo_flujo),
-               orden_flujo=estado.orden_flujo,
-               acciones_posibles=acciones
-           ))
-       
+                id_estado=estado.id_estado_flujo,
+                nombre_estado=estado.nombre_estado,
+                descripcion=estado.descripcion or "",
+                es_estado_final=estado.es_estado_final,
+                tipo_flujo=estado.tipo_flujo.value if hasattr(estado.tipo_flujo, 'value') else str(estado.tipo_flujo),
+                orden_flujo=estado.orden_flujo,
+                acciones_posibles=acciones
+            ))
+        
         return estados_info
     
-    def get_pending_missions_by_role(
+    def get_pending_missions_by_permission(
         self, 
-        role_name: str, 
         user: Union[Usuario, dict], 
         filters: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        Obtiene las misiones pendientes según el rol específico.
+        Obtiene las misiones pendientes según los permisos del usuario.
         """
-        # Mapeo de roles a estados de workflow
-        role_state_mapping = {
-            'Jefe Inmediato': ['PENDIENTE_JEFE'],
-            'Analista Tesorería': ['PENDIENTE_REVISION_TESORERIA', 'APROBADO_PARA_PAGO', 'PENDIENTE_FIRMA_ELECTRONICA'],
-            'Analista Presupuesto': ['PENDIENTE_ASIGNACION_PRESUPUESTO'],
-            'Analista Contabilidad': ['PENDIENTE_CONTABILIDAD'],
-            'Director Finanzas': ['PENDIENTE_APROBACION_FINANZAS'],
-            'Fiscalizador CGR': ['PENDIENTE_REFRENDO_CGR'],
-            'Custodio Caja Menuda': ['APROBADO_PARA_PAGO']
-        }
+        # Determinar qué estados puede gestionar basado en permisos
+        target_states = []
         
-        # Obtener estados relevantes para el rol
-        target_states = role_state_mapping.get(role_name, [])
+        if self._is_jefe_inmediato(user):
+            target_states.append('PENDIENTE_JEFE')
+        
+        if self._can_view_pagos(user) and self._can_approve_missions(user):
+            target_states.extend(['PENDIENTE_REVISION_TESORERIA', 'PENDIENTE_FIRMA_ELECTRONICA'])
+        
+        if self._can_view_presupuesto(user) and self._can_approve_missions(user):
+            target_states.append('PENDIENTE_ASIGNACION_PRESUPUESTO')
+        
+        if self._can_view_contabilidad(user) and self._can_approve_missions(user):
+            target_states.append('PENDIENTE_CONTABILIDAD')
+        
+        if self._can_approve_missions(user):
+            target_states.append('PENDIENTE_APROBACION_FINANZAS')
+        
+        if self._can_view_fiscalizacion(user) and self._can_approve_missions(user):
+            target_states.append('PENDIENTE_REFRENDO_CGR')
+        
+        if self._can_pay_missions(user):
+            target_states.append('APROBADO_PARA_PAGO')
+        
         if not target_states:
-            raise WorkflowException(f"No hay estados definidos para el rol {role_name}")
+            return {
+                'items': [],
+                'total': 0,
+                'page': filters.get('page', 1),
+                'size': filters.get('size', 20),
+                'total_pages': 0,
+                'stats': {'total_pendientes': 0, 'urgentes': 0, 'antiguos': 0}
+            }
         
         # Debug logging
-        print(f"DEBUG WorkflowService - role_name: {role_name}")
         print(f"DEBUG WorkflowService - target_states: {target_states}")
         print(f"DEBUG WorkflowService - user type: {type(user)}")
         
@@ -665,19 +932,19 @@ class WorkflowService:
             EstadoFlujo.nombre_estado.in_(target_states)
         )
         
-        # Aplicar filtros específicos por rol
-        if role_name == 'Jefe Inmediato' and isinstance(user, dict):
+        # Aplicar filtros específicos por permisos
+        if self._is_jefe_inmediato(user) and isinstance(user, dict):
             # Para jefes, solo mostrar solicitudes de sus subordinados
             query = self._apply_supervisor_filter(query, user)
-        elif role_name == 'Analista Tesorería':
-            # Para tesorería, mostrar según el estado actual
-            pass  # Ya filtrado por target_states
-        elif role_name == 'Custodio Caja Menuda':
-            # Solo mostrar solicitudes de caja menuda listas para pago
+        elif self._can_pay_missions(user) and 'APROBADO_PARA_PAGO' in target_states:
+            # Para custodios, solo mostrar caja menuda listas para pago
             query = query.filter(
-                and_(
-                    EstadoFlujo.nombre_estado == 'APROBADO_PARA_PAGO',
-                    Mision.tipo_mision == TipoMision.CAJA_MENUDA
+                or_(
+                    EstadoFlujo.nombre_estado != 'APROBADO_PARA_PAGO',
+                    and_(
+                        EstadoFlujo.nombre_estado == 'APROBADO_PARA_PAGO',
+                        Mision.tipo_mision == TipoMision.CAJA_MENUDA
+                    )
                 )
             )
         
@@ -687,7 +954,8 @@ class WorkflowService:
             query = query.filter(
                 or_(
                     Mision.objetivo_mision.ilike(search_term),
-                    Mision.destino_mision.ilike(search_term)
+                    Mision.destino_mision.ilike(search_term),
+                    Mision.numero_solicitud.ilike(search_term)
                 )
             )
         
@@ -704,482 +972,378 @@ class WorkflowService:
         
         if filters.get('monto_min'):
             query = query.filter(Mision.monto_total_calculado >= filters['monto_min'])
-       
+        
         if filters.get('monto_max'):
             query = query.filter(Mision.monto_total_calculado <= filters['monto_max'])
-       
-       # Ordenar por fecha de creación (más antiguos primero para priorizar)
+        
+        # Ordenar por fecha de creación (más antiguos primero para priorizar)
         query = query.order_by(Mision.created_at.asc())
-       
-       # Obtener total para paginación
+        
+        # Obtener total para paginación
         total_count = query.count()
-       
-       # Aplicar paginación
+        
+        # Aplicar paginación
         page = filters.get('page', 1)
         size = filters.get('size', 20)
         offset = (page - 1) * size
-       
+        
         missions = query.offset(offset).limit(size).all()
-       
-       # Calcular estadísticas básicas simplificadas
+        
+        # Calcular estadísticas básicas simplificadas
         total_query = self.db.query(Mision).join(
-           EstadoFlujo, Mision.id_estado_flujo == EstadoFlujo.id_estado_flujo
-       ).filter(EstadoFlujo.nombre_estado.in_(target_states))
-       
-        if role_name == 'Jefe Inmediato' and isinstance(user, dict):
-           total_query = self._apply_supervisor_filter(total_query, user)
-        elif role_name == 'Custodio Caja Menuda':
-           total_query = total_query.filter(
-               and_(
-                   EstadoFlujo.nombre_estado == 'APROBADO_PARA_PAGO',
-                   Mision.tipo_mision == TipoMision.CAJA_MENUDA
-               )
-           )
-       
+            EstadoFlujo, Mision.id_estado_flujo == EstadoFlujo.id_estado_flujo
+        ).filter(EstadoFlujo.nombre_estado.in_(target_states))
+        
+        if self._is_jefe_inmediato(user) and isinstance(user, dict):
+            total_query = self._apply_supervisor_filter(total_query, user)
+        elif self._can_pay_missions(user) and 'APROBADO_PARA_PAGO' in target_states:
+            total_query = total_query.filter(
+                or_(
+                    EstadoFlujo.nombre_estado != 'APROBADO_PARA_PAGO',
+                    and_(
+                        EstadoFlujo.nombre_estado == 'APROBADO_PARA_PAGO',
+                        Mision.tipo_mision == TipoMision.CAJA_MENUDA
+                    )
+                )
+            )
+        
         stats = {
-           'total_pendientes': total_query.count(),
-           'urgentes': 0,  # Simplificado por ahora
-           'antiguos': 0   # Simplificado por ahora
-       }
-       
+            'total_pendientes': total_query.count(),
+            'urgentes': 0,  # Simplificado por ahora
+            'antiguos': 0   # Simplificado por ahora
+        }
+        
         return {
-           'items': missions,
-           'total': total_count,
-           'page': page,
-           'size': size,
-           'total_pages': (total_count + size - 1) // size,
-           'stats': stats
-       }
+            'items': missions,
+            'total': total_count,
+            'page': page,
+            'size': size,
+            'total_pages': (total_count + size - 1) // size,
+            'stats': stats
+        }
+    
     def _apply_supervisor_filter(self, query, jefe: dict):
-       """
-       Aplica filtro para que los jefes solo vean solicitudes de sus subordinados.
-       """
-       if not self.db_rrhh:
-           raise BusinessException("No hay conexión con RRHH para validar supervisión")
-       
-       jefe_cedula = jefe.get('cedula')
-       
-       # Obtener los empleados bajo la supervisión del jefe
-       result = self.db_rrhh.execute(text("""
-           SELECT np.personal_id
-           FROM aitsa_rrhh.nompersonal np
-           JOIN aitsa_rrhh.departamento d ON np.IdDepartamento = d.IdDepartamento
-           WHERE d.IdJefe = :jefe_cedula
-       """), {"jefe_cedula": jefe_cedula})
-       
-       supervised_employees = [row.personal_id for row in result.fetchall()]
-       
-       if supervised_employees:
-           query = query.filter(Mision.beneficiario_personal_id.in_(supervised_employees))
-       else:
-           # Si no tiene empleados bajo supervisión, no mostrar nada
-           query = query.filter(text("1=0"))
-       
-       return query
-   
-   # ===============================================
-   # MÉTODOS AUXILIARES Y VALIDACIONES
-   # ===============================================
-   
+        """
+        Aplica filtro para que los jefes solo vean solicitudes de sus subordinados.
+        """
+        if not self.db_rrhh:
+            raise BusinessException("No hay conexión con RRHH para validar supervisión")
+        
+        jefe_cedula = jefe.get('cedula')
+        
+        # Obtener los empleados bajo la supervisión del jefe
+        result = self.db_rrhh.execute(text("""
+            SELECT np.personal_id
+            FROM aitsa_rrhh.nompersonal np
+            JOIN aitsa_rrhh.departamento d ON np.IdDepartamento = d.IdDepartamento
+            WHERE d.IdJefe = :jefe_cedula
+        """), {"jefe_cedula": jefe_cedula})
+        
+        supervised_employees = [row.personal_id for row in result.fetchall()]
+        
+        if supervised_employees:
+            query = query.filter(Mision.beneficiario_personal_id.in_(supervised_employees))
+        else:
+            # Si no tiene empleados bajo supervisión, no mostrar nada
+            query = query.filter(text("1=0"))
+        
+        return query
+    
+    # ===============================================
+    # MÉTODOS AUXILIARES Y VALIDACIONES
+    # ===============================================
+    
     def _get_mission_with_validation(self, mission_id: int, user: Union[Usuario, dict]) -> Mision:
-       """Obtiene una misión con validaciones de acceso"""
-       mision = self.db.query(Mision).options(
-           joinedload(Mision.estado_flujo)
-       ).filter(Mision.id_mision == mission_id).first()
-       
-       if not mision:
-           raise HTTPException(status_code=404, detail="Misión no encontrada")
-       
-       # Validar acceso según el rol
-       if not self._can_access_mission(mision, user):
-           raise PermissionException("No tiene permisos para acceder a esta misión")
-       
-       return mision
-   
+        """Obtiene una misión con validaciones de acceso"""
+        mision = self.db.query(Mision).options(
+            joinedload(Mision.estado_flujo)
+        ).filter(Mision.id_mision == mission_id).first()
+        
+        if not mision:
+            raise HTTPException(status_code=404, detail="Misión no encontrada")
+        
+        # Validar acceso según permisos
+        if not self._can_access_mission(mision, user):
+            raise PermissionException("No tiene permisos para acceder a esta misión")
+        
+        return mision
+    
     def _validate_and_get_transition(
-       self, 
-       mision: Mision, 
-       action: str, 
-       user: Union[Usuario, dict]
-   ) -> TransicionFlujo:
-       """Valida y obtiene la transición correspondiente"""
-       user_role_id = user.get('id_rol') if isinstance(user, dict) else user.id_rol
-       
-       transicion = self.db.query(TransicionFlujo).options(
-           joinedload(TransicionFlujo.estado_destino)
-       ).filter(
-           and_(
-               TransicionFlujo.id_estado_origen == mision.id_estado_flujo,
-               TransicionFlujo.id_rol_autorizado == user_role_id,
-               TransicionFlujo.tipo_accion == action.upper(),
-               TransicionFlujo.es_activa == True
-           )
-       ).first()
-       
-       if not transicion:
-           raise WorkflowException(
-               f"La acción '{action}' no está permitida en el estado actual '{mision.estado_flujo.nombre_estado}' para su rol"
-           )
-       
-       return transicion
-   
-    def _validate_employee_supervision(self, mision: Mision, jefe: dict):
-       """Valida que el empleado beneficiario está bajo la supervisión del jefe"""
-       if not self.db_rrhh:
-           raise BusinessException("No hay conexión con RRHH para validar supervisión")
-       
-       # Obtener información del empleado beneficiario
-       result = self.db_rrhh.execute(text("""
-           SELECT np.IdDepartamento, d.IdJefe, np.apenom
-           FROM aitsa_rrhh.nompersonal np
-           JOIN aitsa_rrhh.departamento d ON np.IdDepartamento = d.IdDepartamento
-           WHERE np.personal_id = :personal_id
-       """), {"personal_id": mision.beneficiario_personal_id})
-       
-       employee_info = result.fetchone()
-       if not employee_info:
-           raise BusinessException("No se encontró información del empleado beneficiario")
-       
-       jefe_cedula = jefe.get('cedula')
-       if employee_info.IdJefe != jefe_cedula:
-           raise PermissionException(
-               f"No tiene autorización para aprobar esta solicitud. "
-               f"El jefe autorizado es: {employee_info.IdJefe}"
-           )
-   
-    def _validate_budget_items(self, partidas: List[PartidaPresupuestariaBase]):
-       """Valida que las partidas presupuestarias existan en el sistema"""
-       if not self.db_rrhh:
-           raise BusinessException("No hay conexión con RRHH para validar partidas")
-       
-       codigos = [p.codigo_partida for p in partidas]
-       
-       result = self.db_rrhh.execute(text("""
-           SELECT CodCue FROM aitsa_rrhh.cwprecue 
-           WHERE CodCue IN :codigos
-       """), {"codigos": tuple(codigos)})
-       
-       codigos_validos = [row.CodCue for row in result.fetchall()]
-       codigos_invalidos = [c for c in codigos if c not in codigos_validos]
-       
-       if codigos_invalidos:
-           raise ValidationException(
-               f"Las siguientes partidas presupuestarias no existen: {', '.join(codigos_invalidos)}"
-           )
-   
-    def _can_access_mission(self, mision: Mision, user: Union[Usuario, dict]) -> bool:
-       """Determina si un usuario puede acceder a una misión"""
-       if isinstance(user, dict):  # Empleado
-           # Los empleados solo pueden ver sus propias misiones
-           # o las de sus subordinados si son jefes
-           cedula = user.get('cedula')
-           if user.get('is_department_head'):
-               # TODO: Implementar lógica para jefes
-               return True
-           else:
-               # Verificar que sea su propia misión
-               if self.db_rrhh:
-                   result = self.db_rrhh.execute(text("""
-                       SELECT personal_id FROM aitsa_rrhh.nompersonal 
-                       WHERE cedula = :cedula
-                   """), {"cedula": cedula})
-                   employee = result.fetchone()
-                   return employee and employee.personal_id == mision.beneficiario_personal_id
-               return False
-       else:  # Usuario financiero
-           # Los usuarios financieros tienen acceso según su rol
-           return True  # Simplificado, puede refinarse según reglas específicas
-   
-    def _can_edit_mission(self, mision: Mision, user: Union[Usuario, dict]) -> bool:
-       """Determina si una misión puede ser editada"""
-       # Solo se puede editar en estados iniciales
-       estados_editables = ['BORRADOR', 'DEVUELTO_CORRECCION']
-       return mision.estado_flujo.nombre_estado in estados_editables
-   
-    def _can_delete_mission(self, mision: Mision, user: Union[Usuario, dict]) -> bool:
-       """Determina si una misión puede ser eliminada"""
-       # Solo el creador puede eliminar y solo en estado inicial
-       if isinstance(user, dict):
-           return False  # Los empleados no pueden eliminar
-       
-       return (
-           mision.estado_flujo.nombre_estado == 'BORRADOR' and
-           mision.id_usuario_prepara == user.id_usuario
-       )
-   
-    def _requires_additional_data(self, action: TipoAccion, role_name: str) -> bool:
-       """Determina si una acción requiere datos adicionales específicos"""
-       # Normalizar acción a string
-       action_str = action.value if hasattr(action, 'value') else str(action)
-       
-       additional_data_required = {
-           ('APROBAR', 'Analista Presupuesto'): True,  # Requiere partidas
-           ('APROBAR', 'Director Finanzas'): True,     # Puede requerir monto_aprobado
-           ('APROBAR', 'Fiscalizador CGR'): True,      # Puede requerir número de refrendo
-           ('RECHAZAR', 'Jefe Inmediato'): True,       # Requiere motivo
-           ('DEVOLVER', '*'): True,                    # Requiere comentarios
-       }
-       
-       return additional_data_required.get((action_str, role_name), False) or \
-              additional_data_required.get((action_str, '*'), False)
-   
-    def _create_history_record(
-       self, 
-       mision: Mision, 
-       transicion: TransicionFlujo, 
-       request_data: WorkflowActionBase,
-       user: Union[Usuario, dict],
-       client_ip: Optional[str]
-   ):
-       """Crea un registro en el historial de flujo"""
-       user_id = user.id_usuario if isinstance(user, Usuario) else 1  # Usuario sistema para empleados
-       
-       historial = HistorialFlujo(
-           id_mision=mision.id_mision,
-           id_usuario_accion=user_id,
-           id_estado_anterior=transicion.id_estado_origen,
-           id_estado_nuevo=transicion.id_estado_destino,
-           tipo_accion=transicion.tipo_accion,
-           comentarios=request_data.comentarios,
-           datos_adicionales=request_data.datos_adicionales,
-           ip_usuario=client_ip
-       )
-       
-       self.db.add(historial)
-   
-   # ===============================================
-   # MÉTODOS ADICIONALES PARA CASOS ESPECIALES
-   # ===============================================
-   
-    def execute_workflow_action_with_target_state(
-       self, 
-       mission_id: int, 
-       action: str, 
-       target_state_id: int,
-       user: Union[Usuario, dict],
-       request_data: WorkflowActionBase,
-       client_ip: Optional[str] = None
-   ) -> WorkflowTransitionResponse:
-       """
-       Ejecuta una acción específica del workflow con un estado destino forzado.
-       """
-       mision = self._get_mission_with_validation(mission_id, user)
-       estado_anterior = mision.estado_flujo.nombre_estado
-       
-       try:
-           # Procesar según la acción
-           if action == "DEVOLVER":
-               resultado = self._process_jefe_return_for_correction(mision, request_data, user)
-           elif action == "APROBAR_DIRECTO":
-               resultado = self._process_jefe_direct_approval(mision, request_data, user)
-           else:
-               resultado = {
-                   'message': f'Acción {action} ejecutada exitosamente',
-                   'datos_adicionales': {}
-               }
-           
-           # Cambiar al estado específico
-           mision.id_estado_flujo = target_state_id
-           
-           # Crear historial
-           self._create_manual_history_record(
-               mision, 
-               mision.id_estado_flujo,
-               target_state_id, 
-               action, 
-               request_data, 
-               user, 
-               client_ip
-           )
-           
-           # Obtener nombre del estado destino
-           target_state = self.db.query(EstadoFlujo).filter(
-               EstadoFlujo.id_estado_flujo == target_state_id
-           ).first()
-           
-           self.db.commit()
-           
-           return WorkflowTransitionResponse(
-               success=True,
-               message=resultado.get('message', f'Acción {action} ejecutada exitosamente'),
-               mission_id=mission_id,
-               estado_anterior=estado_anterior,
-               estado_nuevo=target_state.nombre_estado if target_state else "DESCONOCIDO",
-               accion_ejecutada=action,
-               requiere_accion_adicional=resultado.get('requiere_accion_adicional', False),
-               datos_transicion=resultado.get('datos_adicionales')
-           )
-           
-       except Exception as e:
-           self.db.rollback()
-           raise WorkflowException(f"Error ejecutando acción {action}: {str(e)}")
-   
-    def _process_jefe_return_for_correction(
-       self, 
-       mision: Mision, 
-       request_data,
-       user: dict
-   ) -> Dict[str, Any]:
-       """Procesa devolución para corrección por parte del jefe"""
-       self._validate_employee_supervision(mision, user)
-       
-       motivo = getattr(request_data, 'motivo', 'Sin motivo especificado')
-       observaciones = getattr(request_data, 'observaciones_correccion', None)
-       
-       return {
-           'message': f'Solicitud devuelta para corrección por {user.get("apenom", "Jefe Inmediato")}',
-           'requiere_accion_adicional': True,
-           'datos_adicionales': {
-               'motivo': motivo,
-               'observaciones_correccion': observaciones,
-               'jefe_cedula': user.get('cedula'),
-               'jefe_nombre': user.get('apenom'),
-               'accion_requerida': 'CORREGIR_SOLICITUD'
-           }
-       }
-   
-    def _process_jefe_direct_approval(
-       self, 
-       mision: Mision, 
-       request_data,
-       user: dict
-   ) -> Dict[str, Any]:
-       """Procesa aprobación directa para pago por parte del jefe"""
-       self._validate_employee_supervision(mision, user)
-       
-       monto_aprobado = getattr(request_data, 'monto_aprobado', None)
-       if monto_aprobado:
-           mision.monto_aprobado = monto_aprobado
-       else:
-           mision.monto_aprobado = mision.monto_total_calculado
-       
-       justificacion = getattr(request_data, 'justificacion', 'Aprobación directa por jefe inmediato')
-       es_emergencia = getattr(request_data, 'es_emergencia', False)
-       
-       return {
-           'message': f'Solicitud aprobada directamente para pago por {user.get("apenom", "Jefe Inmediato")}',
-           'datos_adicionales': {
-               'justificacion': justificacion,
-               'es_emergencia': es_emergencia,
-               'monto_aprobado': float(mision.monto_aprobado),
-               'jefe_cedula': user.get('cedula'),
-               'jefe_nombre': user.get('apenom'),
-               'flujo_simplificado': True
-           }
-       }
-   
-    def _create_manual_history_record(
-       self, 
-       mision: Mision, 
-       estado_anterior_id: int,
-       estado_nuevo_id: int,
-       accion: str,
-       request_data,
-       user: Union[Usuario, dict],
-       client_ip: Optional[str]
-   ):
-       """Crea un registro manual en el historial"""
-       user_id = user.id_usuario if isinstance(user, Usuario) else 1
-       
-       historial = HistorialFlujo(
-           id_mision=mision.id_mision,
-           id_usuario_accion=user_id,
-           id_estado_anterior=estado_anterior_id,
-           id_estado_nuevo=estado_nuevo_id,
-           tipo_accion=accion,
-           comentarios=getattr(request_data, 'comentarios', None),
-           datos_adicionales=getattr(request_data, 'datos_adicionales', None),
-           ip_usuario=client_ip
-       )
-       
-       self.db.add(historial)
-   
-    def get_employee_missions(
-       self, 
-       employee: dict, 
-       filters: Dict[str, Any]
-   ) -> Dict[str, Any]:
-       """
-       Obtiene las misiones del empleado (solicitudes propias).
-       """
-       if not self.db_rrhh:
-           raise BusinessException("No hay conexión con RRHH para obtener datos del empleado")
-       
-       # Obtener personal_id del empleado
-       cedula = employee.get('cedula')
-       result = self.db_rrhh.execute(text("""
-           SELECT personal_id FROM aitsa_rrhh.nompersonal 
-           WHERE cedula = :cedula
-       """), {"cedula": cedula})
-       
-       employee_info = result.fetchone()
-       if not employee_info:
-           raise BusinessException("No se encontró información del empleado")
-       
-       personal_id = employee_info.personal_id
-       
-       # Construir query para las misiones del empleado
-       query = self.db.query(Mision).options(
-           joinedload(Mision.estado_flujo)
-       ).filter(Mision.beneficiario_personal_id == personal_id)
-       
-       # Aplicar filtros
-       if filters.get('search'):
-           search_term = f"%{filters['search']}%"
-           query = query.filter(
-               or_(
-                   Mision.objetivo_mision.ilike(search_term),
-                   Mision.destino_mision.ilike(search_term),
-                   Mision.numero_solicitud.ilike(search_term)
-               )
-           )
-       
-       if filters.get('estado'):
-           query = query.join(EstadoFlujo).filter(
-               EstadoFlujo.nombre_estado == filters['estado']
-           )
-       
-       if filters.get('tipo_mision'):
-           tipo_enum = TipoMision(filters['tipo_mision']) if isinstance(filters['tipo_mision'], str) else filters['tipo_mision']
-           query = query.filter(Mision.tipo_mision == tipo_enum)
-       
-       # Ordenar por fecha de creación (más recientes primero)
-       query = query.order_by(Mision.created_at.desc())
-       
-       # Obtener total para paginación
-       total_count = query.count()
-       
-       # Aplicar paginación
-       page = filters.get('page', 1)
-       size = filters.get('size', 20)
-       offset = (page - 1) * size
-       
-       missions = query.offset(offset).limit(size).all()
-       
-       return {
-           'items': missions,
-           'total': total_count,
-           'page': page,
-           'size': size,
-           'total_pages': (total_count + size - 1) // size,
-           'employee_info': {
-               'cedula': cedula,
-               'nombre': employee.get('apenom'),
-               'personal_id': personal_id
-           }
-       }
-
-    def _create_history_record_with_states(
         self, 
         mision: Mision, 
-        estado_anterior_id: int,
-        estado_nuevo_id: int,
-        tipo_accion,
+        action: str, 
+        user: Union[Usuario, dict]
+    ) -> TransicionFlujo:
+        """Valida y obtiene la transición correspondiente basado en permisos"""
+        # En lugar de usar transiciones de BD, validar basado en lógica de permisos
+        estado_actual = mision.estado_flujo.nombre_estado
+        
+        # Crear transición ficticia para compatibilidad
+        transicion = TransicionFlujo()
+        transicion.id_estado_origen = mision.id_estado_flujo
+        transicion.tipo_accion = action.upper()
+        
+        # Determinar estado destino basado en acción y estado actual
+        estado_destino_id = self._determine_next_state(estado_actual, action, mision, user)
+        transicion.id_estado_destino = estado_destino_id
+        
+        # Validar que el usuario tiene permisos para esta acción
+        if not self._can_perform_action(estado_actual, action, user):
+            raise WorkflowException(
+                f"La acción '{action}' no está permitida en el estado actual '{estado_actual}' para sus permisos"
+            )
+        
+        return transicion
+    
+    def _determine_next_state(self, estado_actual: str, action: str, mision: Mision, user: Union[Usuario, dict]) -> int:
+        """Determina el próximo estado basado en la acción y estado actual"""
+        action_upper = action.upper()
+        
+        if action_upper == 'ENVIAR':
+            return self._states_cache['PENDIENTE_JEFE'].id_estado_flujo
+        elif action_upper == 'APROBAR':
+            if estado_actual == 'PENDIENTE_JEFE':
+                return self._states_cache['PENDIENTE_REVISION_TESORERIA'].id_estado_flujo
+            elif estado_actual == 'PENDIENTE_REVISION_TESORERIA':
+                if mision.tipo_mision == TipoMision.CAJA_MENUDA:
+                    return self._states_cache['APROBADO_PARA_PAGO'].id_estado_flujo
+                else:
+                    return self._states_cache['PENDIENTE_ASIGNACION_PRESUPUESTO'].id_estado_flujo
+            elif estado_actual == 'PENDIENTE_ASIGNACION_PRESUPUESTO':
+                return self._states_cache['PENDIENTE_CONTABILIDAD'].id_estado_flujo
+            elif estado_actual == 'PENDIENTE_CONTABILIDAD':
+                return self._states_cache['PENDIENTE_APROBACION_FINANZAS'].id_estado_flujo
+            elif estado_actual == 'PENDIENTE_APROBACION_FINANZAS':
+                return self._states_cache['APROBADO_PARA_PAGO'].id_estado_flujo  # O CGR según monto
+            elif estado_actual == 'PENDIENTE_REFRENDO_CGR':
+                return self._states_cache['APROBADO_PARA_PAGO'].id_estado_flujo
+            elif estado_actual == 'APROBADO_PARA_PAGO':
+                return self._states_cache['PAGADO'].id_estado_flujo
+        elif action_upper == 'RECHAZAR':
+            return self._states_cache['RECHAZADO'].id_estado_flujo
+        elif action_upper == 'DEVOLVER':
+            return self._states_cache['DEVUELTO_CORRECCION'].id_estado_flujo
+        elif action_upper == 'APROBAR_DIRECTO':
+            return self._states_cache['APROBADO_PARA_PAGO'].id_estado_flujo
+        
+        # Estado por defecto
+        return mision.id_estado_flujo
+    
+    def _can_perform_action(self, estado_actual: str, action: str, user: Union[Usuario, dict]) -> bool:
+        """Verifica si el usuario puede realizar una acción específica en el estado actual"""
+        action_upper = action.upper()
+        
+        if estado_actual == 'BORRADOR' or estado_actual == 'DEVUELTO_CORRECCION':
+            return action_upper == 'ENVIAR' and (
+                self._has_permission(user, 'MISSION_CREATE') or 
+                self._has_permission(user, 'MISSION_EDIT')
+            )
+        
+        elif estado_actual == 'PENDIENTE_JEFE':
+            return self._is_jefe_inmediato(user) and action_upper in ['APROBAR', 'RECHAZAR', 'DEVOLVER', 'APROBAR_DIRECTO']
+        
+        elif estado_actual == 'PENDIENTE_REVISION_TESORERIA':
+            return (self._can_view_pagos(user) and self._can_approve_missions(user) and 
+                   action_upper in ['APROBAR', 'RECHAZAR', 'DEVOLVER'])
+        
+        elif estado_actual == 'PENDIENTE_ASIGNACION_PRESUPUESTO':
+            return (self._can_view_presupuesto(user) and self._can_approve_missions(user) and 
+                   action_upper in ['APROBAR', 'RECHAZAR'])
+        
+        elif estado_actual == 'PENDIENTE_CONTABILIDAD':
+            return (self._can_view_contabilidad(user) and self._can_approve_missions(user) and 
+                   action_upper in ['APROBAR', 'RECHAZAR'])
+        
+        elif estado_actual == 'PENDIENTE_APROBACION_FINANZAS':
+            return (self._can_approve_missions(user) and action_upper in ['APROBAR', 'RECHAZAR'])
+        
+        elif estado_actual == 'PENDIENTE_REFRENDO_CGR':
+            return (self._can_view_fiscalizacion(user) and self._can_approve_missions(user) and 
+                   action_upper in ['APROBAR', 'RECHAZAR'])
+        
+        elif estado_actual == 'APROBADO_PARA_PAGO':
+            return (self._can_pay_missions(user) and action_upper in ['APROBAR', 'PROCESAR_PAGO'])
+        
+        elif estado_actual == 'PENDIENTE_FIRMA_ELECTRONICA':
+            return (self._can_pay_missions(user) and action_upper in ['APROBAR', 'CONFIRMAR_PAGO'])
+        
+        return False
+    
+    def _validate_employee_supervision(self, mision: Mision, jefe: dict):
+        """Valida que el empleado beneficiario está bajo la supervisión del jefe"""
+        if not self.db_rrhh:
+            raise BusinessException("No hay conexión con RRHH para validar supervisión")
+        
+        # Obtener información del empleado beneficiario
+        result = self.db_rrhh.execute(text("""
+            SELECT np.IdDepartamento, d.IdJefe, np.apenom
+            FROM aitsa_rrhh.nompersonal np
+            JOIN aitsa_rrhh.departamento d ON np.IdDepartamento = d.IdDepartamento
+            WHERE np.personal_id = :personal_id
+        """), {"personal_id": mision.beneficiario_personal_id})
+        
+        employee_info = result.fetchone()
+        if not employee_info:
+            raise BusinessException("No se encontró información del empleado beneficiario")
+        
+        jefe_cedula = jefe.get('cedula')
+        if employee_info.IdJefe != jefe_cedula:
+            raise PermissionException(
+                f"No tiene autorización para aprobar esta solicitud. "
+                f"El jefe autorizado es: {employee_info.IdJefe}"
+            )
+    
+    def _validate_budget_items(self, partidas: List[PartidaPresupuestariaBase]):
+        """Valida que las partidas presupuestarias existan en el sistema"""
+        if not self.db_rrhh:
+            raise BusinessException("No hay conexión con RRHH para validar partidas")
+        
+        codigos = [p.codigo_partida for p in partidas]
+        
+        result = self.db_rrhh.execute(text("""
+            SELECT CodCue FROM aitsa_rrhh.cwprecue 
+            WHERE CodCue IN :codigos
+        """), {"codigos": tuple(codigos)})
+        
+        codigos_validos = [row.CodCue for row in result.fetchall()]
+        codigos_invalidos = [c for c in codigos if c not in codigos_validos]
+        
+        if codigos_invalidos:
+            raise ValidationException(
+                f"Las siguientes partidas presupuestarias no existen: {', '.join(codigos_invalidos)}"
+            )
+    
+    def _can_access_mission(self, mision: Mision, user: Union[Usuario, dict]) -> bool:
+        """Determina si un usuario puede acceder a una misión"""
+        if isinstance(user, dict):  # Empleado
+            # Los empleados solo pueden ver sus propias misiones
+            # o las de sus subordinados si son jefes
+            cedula = user.get('cedula')
+            if self._is_jefe_inmediato(user):
+                # Los jefes pueden ver solicitudes de sus subordinados
+                return True  # Se validará en _apply_supervisor_filter
+            else:
+                # Verificar que sea su propia misión
+                if self.db_rrhh:
+                    result = self.db_rrhh.execute(text("""
+                        SELECT personal_id FROM aitsa_rrhh.nompersonal 
+                        WHERE cedula = :cedula
+                    """), {"cedula": cedula})
+                    employee = result.fetchone()
+                    return employee and employee.personal_id == mision.beneficiario_personal_id
+                return False
+        else:  # Usuario financiero
+            # Los usuarios financieros tienen acceso según sus permisos
+            return self._has_permission(user, 'GESTION_SOLICITUDES_VIEW')
+    
+    def _can_edit_mission(self, mision: Mision, user: Union[Usuario, dict]) -> bool:
+        """Determina si una misión puede ser editada"""
+        # Solo se puede editar en estados iniciales
+        estados_editables = ['BORRADOR', 'DEVUELTO_CORRECCION']
+        can_edit_state = mision.estado_flujo.nombre_estado in estados_editables
+        has_permission = self._has_permission(user, 'MISSION_EDIT')
+        return can_edit_state and has_permission
+    
+    def _can_delete_mission(self, mision: Mision, user: Union[Usuario, dict]) -> bool:
+        """Determina si una misión puede ser eliminada"""
+        if isinstance(user, dict):
+            return False  # Los empleados no pueden eliminar
+        
+        can_delete_state = mision.estado_flujo.nombre_estado == 'BORRADOR'
+        has_permission = self._has_permission(user, 'MISSION_DELETE')
+        is_owner = mision.id_usuario_prepara == user.id_usuario
+        
+        return can_delete_state and has_permission and is_owner
+    
+    def _create_history_record(
+        self, 
+        mision: Mision, 
+        transicion: TransicionFlujo, 
         request_data: WorkflowActionBase,
         user: Union[Usuario, dict],
         client_ip: Optional[str]
     ):
-        """Crea un registro en el historial con estados específicos"""
+        """Crea un registro en el historial de flujo"""
+        user_id = user.id_usuario if isinstance(user, Usuario) else 1  # Usuario sistema para empleados
+        
+        historial = HistorialFlujo(
+            id_mision=mision.id_mision,
+            id_usuario_accion=user_id,
+            id_estado_anterior=transicion.id_estado_origen,
+            id_estado_nuevo=transicion.id_estado_destino,
+            tipo_accion=transicion.tipo_accion,
+            comentarios=request_data.comentarios,
+            datos_adicionales=request_data.datos_adicionales,
+            ip_usuario=client_ip
+        )
+        
+        self.db.add(historial)
+    
+    def _process_jefe_return_for_correction(
+        self, 
+        mision: Mision, 
+        request_data,
+        user: dict
+    ) -> Dict[str, Any]:
+        """Procesa devolución para corrección por parte del jefe"""
+        self._validate_employee_supervision(mision, user)
+        
+        motivo = getattr(request_data, 'motivo', 'Sin motivo especificado')
+        observaciones = getattr(request_data, 'observaciones_correccion', None)
+        
+        return {
+            'message': f'Solicitud devuelta para corrección por {user.get("apenom", "Jefe Inmediato")}',
+            'requiere_accion_adicional': True,
+            'datos_adicionales': {
+                'motivo': motivo,
+                'observaciones_correccion': observaciones,
+                'jefe_cedula': user.get('cedula'),
+                'jefe_nombre': user.get('apenom'),
+                'accion_requerida': 'CORREGIR_SOLICITUD'
+            }
+        }
+    
+    def _process_jefe_direct_approval(
+        self, 
+        mision: Mision, 
+        request_data,
+        user: dict
+    ) -> Dict[str, Any]:
+        """Procesa aprobación directa para pago por parte del jefe"""
+        self._validate_employee_supervision(mision, user)
+        
+        monto_aprobado = getattr(request_data, 'monto_aprobado', None)
+        if monto_aprobado:
+            mision.monto_aprobado = monto_aprobado
+        else:
+            mision.monto_aprobado = mision.monto_total_calculado
+        
+        justificacion = getattr(request_data, 'justificacion', 'Aprobación directa por jefe inmediato')
+        es_emergencia = getattr(request_data, 'es_emergencia', False)
+        
+        return {
+            'message': f'Solicitud aprobada directamente para pago por {user.get("apenom", "Jefe Inmediato")}',
+            'datos_adicionales': {
+                'justificacion': justificacion,
+                'es_emergencia': es_emergencia,
+                'monto_aprobado': float(mision.monto_aprobado),
+                'jefe_cedula': user.get('cedula'),
+                'jefe_nombre': user.get('apenom'),
+                'flujo_simplificado': True
+            }
+        }
+    
+    def _create_manual_history_record(
+        self, 
+        mision: Mision, 
+        estado_anterior_id: int,
+        estado_nuevo_id: int,
+        accion: str,
+        request_data,
+        user: Union[Usuario, dict],
+        client_ip: Optional[str]
+    ):
+        """Crea un registro manual en el historial"""
         user_id = user.id_usuario if isinstance(user, Usuario) else 1
         
         historial = HistorialFlujo(
@@ -1187,10 +1351,85 @@ class WorkflowService:
             id_usuario_accion=user_id,
             id_estado_anterior=estado_anterior_id,
             id_estado_nuevo=estado_nuevo_id,
-            tipo_accion=tipo_accion,
-            comentarios=request_data.comentarios,
-            datos_adicionales=request_data.datos_adicionales,
+            tipo_accion=accion,
+            comentarios=getattr(request_data, 'comentarios', None),
+            datos_adicionales=getattr(request_data, 'datos_adicionales', None),
             ip_usuario=client_ip
         )
         
         self.db.add(historial)
+    
+    def get_employee_missions(
+        self, 
+        employee: dict, 
+        filters: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Obtiene las misiones del empleado (solicitudes propias).
+        """
+        if not self.db_rrhh:
+            raise BusinessException("No hay conexión con RRHH para obtener datos del empleado")
+        
+        # Obtener personal_id del empleado
+        cedula = employee.get('cedula')
+        result = self.db_rrhh.execute(text("""
+            SELECT personal_id FROM aitsa_rrhh.nompersonal 
+            WHERE cedula = :cedula
+        """), {"cedula": cedula})
+        
+        employee_info = result.fetchone()
+        if not employee_info:
+            raise BusinessException("No se encontró información del empleado")
+        
+        personal_id = employee_info.personal_id
+        
+        # Construir query para las misiones del empleado
+        query = self.db.query(Mision).options(
+            joinedload(Mision.estado_flujo)
+        ).filter(Mision.beneficiario_personal_id == personal_id)
+        
+        # Aplicar filtros
+        if filters.get('search'):
+            search_term = f"%{filters['search']}%"
+            query = query.filter(
+                or_(
+                    Mision.objetivo_mision.ilike(search_term),
+                    Mision.destino_mision.ilike(search_term),
+                    Mision.numero_solicitud.ilike(search_term)
+                )
+            )
+        
+        if filters.get('estado'):
+            query = query.join(EstadoFlujo).filter(
+                EstadoFlujo.nombre_estado == filters['estado']
+            )
+        
+        if filters.get('tipo_mision'):
+            tipo_enum = TipoMision(filters['tipo_mision']) if isinstance(filters['tipo_mision'], str) else filters['tipo_mision']
+            query = query.filter(Mision.tipo_mision == tipo_enum)
+        
+        # Ordenar por fecha de creación (más recientes primero)
+        query = query.order_by(Mision.created_at.desc())
+        
+        # Obtener total para paginación
+        total_count = query.count()
+        
+        # Aplicar paginación
+        page = filters.get('page', 1)
+        size = filters.get('size', 20)
+        offset = (page - 1) * size
+        
+        missions = query.offset(offset).limit(size).all()
+        
+        return {
+            'items': missions,
+            'total': total_count,
+            'page': page,
+            'size': size,
+            'total_pages': (total_count + size - 1) // size,
+            'employee_info': {
+                'cedula': cedula,
+                'nombre': employee.get('apenom'),
+                'personal_id': personal_id
+            }
+        }
