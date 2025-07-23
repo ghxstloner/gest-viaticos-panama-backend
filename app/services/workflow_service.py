@@ -395,6 +395,8 @@ class WorkflowService:
             
             # Commit de la transacción
             self.db.commit()
+            self.db.refresh(mision)
+            print(f"DEBUG POST-COMMIT: id_estado_flujo={mision.id_estado_flujo} para mision {mision.id_mision}")
             
             return WorkflowTransitionResponse(
                 success=True,
@@ -430,7 +432,7 @@ class WorkflowService:
         
         if accion_str == 'APROBAR':
             if estado_actual == 'PENDIENTE_JEFE':
-                return self._process_jefe_approval(mision, transicion, request_data, user)
+                return self._process_jefe_approval(mision, transicion, request_data, user, client_ip)
             elif estado_actual == 'PENDIENTE_REVISION_TESORERIA':
                 return self._process_tesoreria_approval(mision, transicion, request_data, user)
             elif estado_actual == 'PENDIENTE_ASIGNACION_PRESUPUESTO':
@@ -466,12 +468,13 @@ class WorkflowService:
         mision: Mision, 
         transicion: TransicionFlujo, 
         request_data: WorkflowActionBase,
-        user: dict
+        user: dict,
+        client_ip: Optional[str] = None
     ) -> Dict[str, Any]:
         """Procesa aprobación del jefe inmediato"""
-        # Validar que el empleado está bajo su supervisión
         self._validate_employee_supervision(mision, user)
-        
+        mision.id_estado_flujo = transicion.id_estado_destino
+        self._create_history_record(mision, transicion, request_data, user, client_ip)
         return {
             'message': f'Solicitud aprobada por {user.get("apenom", "Jefe Inmediato")}',
             'datos_adicionales': {
@@ -518,6 +521,9 @@ class WorkflowService:
         else:
             # Para viáticos, seguir el flujo normal a presupuesto
             mensaje += ' - Enviada a asignación presupuestaria'
+        
+        mision.id_estado_flujo = transicion.id_estado_destino
+        print(f"DEBUG TESORERIA: transicion.id_estado_destino={transicion.id_estado_destino}")
         
         return {
             'message': mensaje,
@@ -775,9 +781,16 @@ class WorkflowService:
         """Procesa devolución para corrección"""
         user_name = user.get('apenom') if isinstance(user, dict) else user.login_username
         
+        datos_adicionales = {}
+        # Solo tomar 'observaciones_correccion' y guardarlo como 'observacion'
+        observacion = getattr(request_data, 'observaciones_correccion', None)
+        if observacion:
+            datos_adicionales['observacion'] = observacion
+
         return {
             'message': f'Solicitud devuelta para corrección por {user_name}',
-            'requiere_accion_adicional': True
+            'requiere_accion_adicional': True,
+            'datos_adicionales': datos_adicionales
         }
     
     def _process_rejection(
@@ -910,6 +923,7 @@ class WorkflowService:
         
         if self._can_pay_missions(user):
             target_states.append('APROBADO_PARA_PAGO')
+            target_states.append('PAGADO')
         
         if not target_states:
             return {
@@ -936,13 +950,13 @@ class WorkflowService:
         if self._is_jefe_inmediato(user) and isinstance(user, dict):
             # Para jefes, solo mostrar solicitudes de sus subordinados
             query = self._apply_supervisor_filter(query, user)
-        elif self._can_pay_missions(user) and 'APROBADO_PARA_PAGO' in target_states:
-            # Para custodios, solo mostrar caja menuda listas para pago
+        elif self._can_pay_missions(user) and ('APROBADO_PARA_PAGO' in target_states or 'PAGADO' in target_states):
+            # Para custodios, mostrar caja menuda listas para pago y pagadas
             query = query.filter(
                 or_(
-                    EstadoFlujo.nombre_estado != 'APROBADO_PARA_PAGO',
+                    EstadoFlujo.nombre_estado.notin_(['APROBADO_PARA_PAGO', 'PAGADO']),
                     and_(
-                        EstadoFlujo.nombre_estado == 'APROBADO_PARA_PAGO',
+                        EstadoFlujo.nombre_estado.in_(['APROBADO_PARA_PAGO', 'PAGADO']),
                         Mision.tipo_mision == TipoMision.CAJA_MENUDA
                     )
                 )
@@ -958,6 +972,9 @@ class WorkflowService:
                     Mision.numero_solicitud.ilike(search_term)
                 )
             )
+        
+        if filters.get('estado'):
+            query = query.filter(EstadoFlujo.nombre_estado == filters['estado'])
         
         if filters.get('tipo_mision'):
             # Convertir string a enum si es necesario
@@ -996,12 +1013,12 @@ class WorkflowService:
         
         if self._is_jefe_inmediato(user) and isinstance(user, dict):
             total_query = self._apply_supervisor_filter(total_query, user)
-        elif self._can_pay_missions(user) and 'APROBADO_PARA_PAGO' in target_states:
+        elif self._can_pay_missions(user) and ('APROBADO_PARA_PAGO' in target_states or 'PAGADO' in target_states):
             total_query = total_query.filter(
                 or_(
-                    EstadoFlujo.nombre_estado != 'APROBADO_PARA_PAGO',
+                    EstadoFlujo.nombre_estado.notin_(['APROBADO_PARA_PAGO', 'PAGADO']),
                     and_(
-                        EstadoFlujo.nombre_estado == 'APROBADO_PARA_PAGO',
+                        EstadoFlujo.nombre_estado.in_(['APROBADO_PARA_PAGO', 'PAGADO']),
                         Mision.tipo_mision == TipoMision.CAJA_MENUDA
                     )
                 )
@@ -1103,7 +1120,16 @@ class WorkflowService:
             return self._states_cache['PENDIENTE_JEFE'].id_estado_flujo
         elif action_upper == 'APROBAR':
             if estado_actual == 'PENDIENTE_JEFE':
-                return self._states_cache['PENDIENTE_REVISION_TESORERIA'].id_estado_flujo
+                print(f"DEBUG: tipo_mision={mision.tipo_mision} ({type(mision.tipo_mision)}), estado_actual={estado_actual}")
+                if mision.tipo_mision == TipoMision.VIATICOS:
+                    print("DEBUG: Transición a PENDIENTE_REVISION_TESORERIA")
+                    return self._states_cache['PENDIENTE_REVISION_TESORERIA'].id_estado_flujo
+                elif mision.tipo_mision == TipoMision.CAJA_MENUDA:
+                    print("DEBUG: Transición a APROBADO_PARA_PAGO")
+                    return self._states_cache['APROBADO_PARA_PAGO'].id_estado_flujo
+                else:
+                    print("DEBUG: Transición por defecto a PENDIENTE_REVISION_TESORERIA")
+                    return self._states_cache['PENDIENTE_REVISION_TESORERIA'].id_estado_flujo
             elif estado_actual == 'PENDIENTE_REVISION_TESORERIA':
                 if mision.tipo_mision == TipoMision.CAJA_MENUDA:
                     return self._states_cache['APROBADO_PARA_PAGO'].id_estado_flujo
@@ -1143,8 +1169,10 @@ class WorkflowService:
             return self._is_jefe_inmediato(user) and action_upper in ['APROBAR', 'RECHAZAR', 'DEVOLVER', 'APROBAR_DIRECTO']
         
         elif estado_actual == 'PENDIENTE_REVISION_TESORERIA':
-            return (self._can_view_pagos(user) and self._can_approve_missions(user) and 
-                   action_upper in ['APROBAR', 'RECHAZAR', 'DEVOLVER'])
+            return (
+                self._has_permission(user, 'MISSION_TESORERIA_APPROVE')
+                and action_upper in ['APROBAR', 'RECHAZAR', 'DEVOLVER']
+            )
         
         elif estado_actual == 'PENDIENTE_ASIGNACION_PRESUPUESTO':
             return (self._can_view_presupuesto(user) and self._can_approve_missions(user) and 

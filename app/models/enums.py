@@ -57,8 +57,8 @@ class TipoTransporte(str, Enum):
 
 class CategoriaBeneficiario(str, Enum):
     TITULAR = "TITULAR"
-    OTROS_SERVIDORES = "OTROS SERVIDORES PÚBLICOS"
-    OTRAS_PERSONAS = "OTRAS PERSONAS"
+    OTROS_SERVIDORES_PUBLICOS = "OTROS_SERVIDORES_PUBLICOS"
+    OTRAS_PERSONAS = "OTRAS_PERSONAS"
 
 
 class TipoViaje(str, Enum):

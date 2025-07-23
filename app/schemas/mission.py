@@ -174,7 +174,7 @@ class TravelExpensesUpdateRequest(BaseModel):
     horaSalida: Optional[str] = Field(None, pattern=r'^([01]?[0-9]|2[0-3]):[0-5][0-9]$')
     fechaRetorno: Optional[date] = None
     horaRetorno: Optional[str] = Field(None, pattern=r'^([01]?[0-9]|2[0-3]):[0-5][0-9]$')
-    categoria: Optional[str] = Field(None, pattern=r'^(TITULAR|OTROS SERVIDORES PÚBLICOS|OTRAS PERSONAS)$')
+    categoria: Optional[str] = Field(None, pattern=r'^(TITULAR|OTROS_SERVIDORES_PUBLICOS|OTRAS_PERSONAS)$')
     viaticosCompletos: Optional[List[ViaticoCompletoEmployee]] = None
     viaticosParciales: Optional[List[ViaticoParcialEmployee]] = None
     transporteDetalle: Optional[List[TransporteDetalleEmployee]] = None
@@ -202,7 +202,7 @@ class TravelExpensesCreateRequest(BaseModel):
     horaSalida: str = Field(..., pattern=r'^([01]?[0-9]|2[0-3]):[0-5][0-9]$')
     fechaRetorno: date
     horaRetorno: str = Field(..., pattern=r'^([01]?[0-9]|2[0-3]):[0-5][0-9]$')
-    categoria: str = Field(..., pattern=r'^(TITULAR|OTROS SERVIDORES PÚBLICOS|OTRAS PERSONAS)$')
+    categoria: str = Field(..., pattern=r'^(TITULAR|OTROS_SERVIDORES_PUBLICOS|OTRAS_PERSONAS)$')
     viaticosCompletos: List[ViaticoCompletoEmployee] = []
     viaticosParciales: List[ViaticoParcialEmployee] = []
     transporteDetalle: List[TransporteDetalleEmployee] = []
@@ -220,6 +220,25 @@ class PettyCashCreateRequest(BaseModel):
     vicepresidencia: str = Field(..., min_length=1)
     viaticosCompletos: List[CajaMenudaViaticoEmployee] = Field(..., min_items=1)
 
+
+class ItemMisionExterior(BaseModel):
+    id_item_mision_exterior: int
+    id_mision: int
+    region: str
+    destino: str
+    fecha_salida: date
+    fecha_retorno: date
+    porcentaje: Optional[Decimal] = None
+    model_config = ConfigDict(from_attributes=True)
+
+
+# --- Esquema para Items Viaticos Completos ---
+class ItemViaticoCompletoSchema(BaseModel):
+    id_item_viatico_completo: int
+    id_mision: int
+    cantidad_dias: int
+    monto_por_dia: Decimal
+    model_config = ConfigDict(from_attributes=True)
 
 class Mision(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -245,12 +264,23 @@ class Mision(BaseModel):
     observaciones_especiales: Optional[str] = None
     fecha_limite_presentacion: Optional[date] = None
     created_at: datetime
-    updated_at: datetime
+    updated_at: datetime    
+    observacion: Optional[str] = None
+    beneficiario_nombre: Optional[str] = None
     
     estado_flujo: "EstadoFlujo"
     items_viaticos: List[ItemViatico] = []
     items_transporte: List[ItemTransporte] = []
     partidas_presupuestarias: List[MisionPartidaPresupuestaria] = []
+    items_misiones_exterior: List[ItemMisionExterior] = []
+    items_viaticos_completos: Optional[List[ItemViaticoCompletoSchema]] = []
+
+    @validator('categoria_beneficiario', pre=True, always=True)
+    def normalize_categoria_beneficiario(cls, v):
+        if isinstance(v, str):
+            v = v.replace('Á', 'A').replace('É', 'E').replace('Í', 'I').replace('Ó', 'O').replace('Ú', 'U').replace('Ü', 'U').replace('Ñ', 'N')
+            v = v.replace(' ', '_').replace("'", '').upper()
+        return v
 
 
 # --- Esquemas para API Responses y Acciones ---
@@ -271,6 +301,7 @@ class MisionListResponseItem(BaseModel):
     monto_total_calculado: Decimal
     estado_flujo: EstadoFlujo
     created_at: datetime
+    observacion: Optional[str]
 
 class MisionListResponse(BaseModel):
     items: List[MisionListResponseItem]

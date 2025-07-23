@@ -19,14 +19,14 @@ from ...core.exceptions import BusinessException, MissionException, WorkflowExce
 from ...services.mission import MissionService
 from ...api.deps import get_current_user, get_current_employee
 
-from ...models.mission import Mision as MisionModel, Adjunto, EstadoFlujo
+from ...models.mission import Mision as MisionModel, Adjunto, EstadoFlujo, HistorialFlujo
 from ...models.user import Usuario
 from ...models.enums import TipoMision, TipoDocumento, TipoAccion
 
 from ...schemas.mission import (
     MisionCreate, MisionUpdate, MisionListResponse, MisionDetail,
     MisionListResponseItem, AttachmentUpload, WorkflowState,
-    PresupuestoAssignRequest, MisionRejectionRequest, MisionApprovalRequest
+    PresupuestoAssignRequest, MisionRejectionRequest, MisionApprovalRequest, Mision
 )
 
 
@@ -182,7 +182,8 @@ async def get_missions(
                 "nombre_estado": m.estado_flujo.nombre_estado,
                 "descripcion": m.estado_flujo.descripcion
             } if m.estado_flujo else None,
-            "created_at": m.created_at
+            "created_at": m.created_at,
+            "observacion": m.observacion
         }
         response_items.append(MisionListResponseItem.model_validate(mission_dict))
     
@@ -266,6 +267,18 @@ async def get_employee_missions(
         # Construir respuesta
         response_items = []
         for mission in missions:
+            # Buscar la última observación de devolución
+            last_return = (
+                db_financiero.query(HistorialFlujo)
+                .filter(
+                    HistorialFlujo.id_mision == mission.id_mision,
+                    HistorialFlujo.tipo_accion == "DEVOLVER"
+                )
+                .order_by(HistorialFlujo.fecha_accion.desc())
+                .first()
+            )
+            observacion = last_return.observacion if last_return else None
+            observacion = str(observacion) if observacion is not None else None
             # Asegurar que estado_flujo está cargado
             if not mission.estado_flujo:
                 estado = db_financiero.query(EstadoFlujo).filter(
@@ -290,7 +303,8 @@ async def get_employee_missions(
                     "nombre_estado": mission.estado_flujo.nombre_estado,
                     "descripcion": mission.estado_flujo.descripcion
                 } if mission.estado_flujo else None,
-                "created_at": mission.created_at
+                "created_at": mission.created_at,
+                "observacion": observacion
             }
             
             response_items.append(MisionListResponseItem.model_validate(mission_item))
@@ -340,7 +354,9 @@ async def get_employee_mission_detail(
         personal_id = employee_record.personal_id
         
         # Buscar la misión
-        mission = db_financiero.query(MisionModel).filter(
+        mission = db_financiero.query(MisionModel).options(
+            joinedload(MisionModel.items_viaticos_completos)
+        ).filter(
             MisionModel.id_mision == mission_id,
             MisionModel.beneficiario_personal_id == personal_id
         ).first()
@@ -348,9 +364,24 @@ async def get_employee_mission_detail(
         if not mission:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Misión no encontrada")
         
-        # Construir respuesta básica para empleados
+        # Buscar la última observación de devolución
+        last_return = (
+            db_financiero.query(HistorialFlujo)
+            .filter(
+                HistorialFlujo.id_mision == mission.id_mision,
+                HistorialFlujo.tipo_accion == "DEVOLVER"
+            )
+            .order_by(HistorialFlujo.fecha_accion.desc())
+            .first()
+        )
+        observacion = last_return.observacion if last_return else None
+        observacion = str(observacion) if observacion is not None else None
+        # Serializar usando el objeto ORM directamente
+        mission_obj = Mision.model_validate(mission)
+        mission_obj.observacion = observacion
+        print("DEBUG MISSION_OBJ:", mission_obj)
         return {
-            "mission": mission,
+            "mission": mission_obj,
             "beneficiary": current_employee,
             "preparer": None,
             "available_actions": [],  # Los empleados no pueden hacer acciones de workflow
@@ -379,7 +410,24 @@ async def get_mission(
     """
     try:
         mission_service = MissionService(db)
-        return mission_service.get_mission_detail(mission_id, current_user)
+        mission_obj = mission_service.get_mission_detail(mission_id, current_user)
+        mission = mission_obj["mission"]
+        if not isinstance(mission, dict):
+            mission = mission.model_dump()
+        mission_id = mission["id_mision"]
+        last_return = (
+            db.query(HistorialFlujo)
+            .filter(
+                HistorialFlujo.id_mision == mission_id,
+                HistorialFlujo.tipo_accion == "DEVOLVER"
+            )
+            .order_by(HistorialFlujo.fecha_accion.desc())
+            .first()
+        )
+        observacion = last_return.observacion if last_return else None
+        mission["observacion"] = observacion
+        mission_obj["mission"] = mission
+        return mission_obj
     except MissionException as me:
         raise HTTPException(status_code=me.status_code, detail=str(me))
     except Exception as e:

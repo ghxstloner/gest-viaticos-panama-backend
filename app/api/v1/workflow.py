@@ -13,6 +13,7 @@ from ...models.user import Usuario
 from ...models.mission import EstadoFlujo, TransicionFlujo, HistorialFlujo
 from ...schemas.workflow import *
 from ...services.workflow_service import WorkflowService
+from ...api.v1.missions import get_beneficiary_names
 
 router = APIRouter(prefix="/workflow", tags=["Workflow Management"])
 
@@ -334,8 +335,8 @@ async def jefe_return_for_correction(
         mision.id_estado_flujo = 8  # DEVUELTO_CORRECCION
         
         # Crear historial
-        user_id = current_user.id_usuario if isinstance(current_user, Usuario) else 1
-        user_name = current_user.login_username if isinstance(current_user, Usuario) else current_user.get('apenom', 'Usuario')
+        user_id = current_user.id_usuario if hasattr(current_user, 'id_usuario') else 1
+        user_name = current_user.login_username if hasattr(current_user, 'login_username') else current_user.get('apenom', 'Usuario')
         
         historial = HistorialFlujo(
             id_mision=mision.id_mision,
@@ -343,10 +344,9 @@ async def jefe_return_for_correction(
             id_estado_anterior=estado_anterior_id,
             id_estado_nuevo=8,
             tipo_accion="DEVOLVER",
-            comentarios=request_data.comentarios,
+            comentarios=None,
+            observacion=request_data.observacion,
             datos_adicionales={
-                'motivo': request_data.motivo,
-                'observaciones_correccion': getattr(request_data, 'observaciones_correccion', None),
                 'usuario_cedula': current_user.get('cedula') if isinstance(current_user, dict) else None,
                 'usuario_nombre': user_name
             },
@@ -365,11 +365,13 @@ async def jefe_return_for_correction(
             accion_ejecutada="DEVOLVER",
             requiere_accion_adicional=True,
             datos_transicion={
-                'motivo': request_data.motivo,
-                'observaciones_correccion': getattr(request_data, 'observaciones_correccion', None)
+                'observacion': request_data.observacion
             }
         )
         
+    except (WorkflowException, PermissionException) as e:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
@@ -476,12 +478,11 @@ async def tesoreria_approve_mission(
     Permite aprobar una solicitud en tesorería.
     """
     try:
-        if not has_permission(current_user, 'PAGOS_VIEW') or not has_permission(current_user, 'MISSION_APPROVE'):
+        if not has_permission(current_user, 'MISSION_TESORERIA_APPROVE'):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Permisos requeridos: PAGOS_VIEW y MISSION_APPROVE"
+                detail="Permiso requerido: MISSION_TESORERIA_APPROVE"
             )
-        
         return workflow_service.execute_workflow_action(
             mission_id=mission_id,
             action="APROBAR",
@@ -489,7 +490,6 @@ async def tesoreria_approve_mission(
             request_data=request_data,
             client_ip=client_ip
         )
-        
     except (WorkflowException, PermissionException) as e:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
     except Exception as e:
@@ -688,7 +688,7 @@ async def confirm_payment(
 @router.post("/missions/{mission_id}/devolver", response_model=WorkflowTransitionResponse)
 async def return_mission_for_correction(
     mission_id: int,
-    request_data: WorkflowActionBase,
+    request_data: DevolverRequest,
     workflow_service: WorkflowService = Depends(get_workflow_service),
     current_user = Depends(get_current_user_universal),
     client_ip: str = Depends(get_client_ip)
@@ -724,45 +724,31 @@ async def get_pending_missions(
     size: int = Query(20, ge=1, le=100),
     search: Optional[str] = Query(None),
     tipo_mision: Optional[str] = Query(None),
+    estado: Optional[str] = Query(None, description="Filtrar por nombre de estado de flujo"),
+    fecha_desde: Optional[str] = Query(None, description="Filtrar desde esta fecha (YYYY-MM-DD)"),
+    fecha_hasta: Optional[str] = Query(None, description="Filtrar hasta esta fecha (YYYY-MM-DD)"),
     workflow_service: WorkflowService = Depends(get_workflow_service),
     current_user = Depends(get_current_user_universal)
 ):
     """
     Obtiene las solicitudes pendientes según los permisos del usuario.
     Funciona tanto para usuarios financieros como empleados.
-    """
-    print(f"🔍 DEBUG pendientes - INICIO DEL ENDPOINT")
-    print(f"🔍 DEBUG pendientes - current_user: {current_user}")
-    print(f"🔍 DEBUG pendientes - type(current_user): {type(current_user)}")
-    
+    """  
     try:
         if not current_user:
-            print(f"🔍 DEBUG pendientes - Usuario no autenticado")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Usuario no autenticado"
             )
         
-        print(f"🔍 DEBUG pendientes - Usuario autenticado: {type(current_user)}")
-        
         # Verificar permisos según el tipo de usuario
         if isinstance(current_user, dict):
-            print(f"🔍 DEBUG - Es empleado, verificando permisos...")
-            print(f"🔍 DEBUG - is_department_head: {current_user.get('is_department_head', False)}")
-            print(f"🔍 DEBUG - permisos_usuario: {current_user.get('permisos_usuario', {})}")
-            
             # Verificar permisos específicos
             mission_approve = has_permission(current_user, 'MISSION_APPROVE')
             gestion_view = has_permission(current_user, 'GESTION_SOLICITUDES_VIEW')
-            is_jefe = is_jefe_inmediato(current_user)
-            
-            print(f"🔍 DEBUG - MISSION_APPROVE: {mission_approve}")
-            print(f"🔍 DEBUG - GESTION_SOLICITUDES_VIEW: {gestion_view}")
-            print(f"🔍 DEBUG - is_jefe_inmediato: {is_jefe}")
-            
+            is_jefe = is_jefe_inmediato(current_user)         
             # Para empleados, verificar si es jefe inmediato
             if not is_jefe:
-                print(f"🔍 DEBUG - NO ES JEFE INMEDIATO - Rechazando acceso")
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Solo los jefes de departamento pueden acceder a las solicitudes pendientes"
@@ -774,19 +760,31 @@ async def get_pending_missions(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Permiso requerido: GESTION_SOLICITUDES_VIEW"
                 )
-        
-        print(f"🔍 DEBUG - Permiso verificado correctamente")
-        
         filters = {
             "page": page,
             "size": size,
             "search": search,
-            "tipo_mision": tipo_mision
+            "tipo_mision": tipo_mision,
+            "estado": estado,
+            "fecha_desde": fecha_desde,
+            "fecha_hasta": fecha_hasta
         }
         
-        print(f"🔍 DEBUG - Llamando a workflow_service.get_pending_missions_by_permission")
         result = workflow_service.get_pending_missions_by_permission(current_user, filters)
-        print(f"🔍 DEBUG - Resultado obtenido: {len(result.get('items', []))} misiones")
+        # Obtener nombres de beneficiarios
+        personal_ids = [m.beneficiario_personal_id for m in result['items'] if getattr(m, 'beneficiario_personal_id', None)]
+        beneficiary_names = get_beneficiary_names(workflow_service.db_rrhh, personal_ids)
+        missions_response = []
+        for m in result['items']:
+            if hasattr(m, 'model_dump'):
+                m_dict = m.model_dump()
+            elif hasattr(m, 'dict'):
+                m_dict = m.dict()
+            else:
+                m_dict = vars(m)
+            m_dict['beneficiario_nombre'] = beneficiary_names.get(getattr(m, 'beneficiario_personal_id', None), "No encontrado")
+            missions_response.append(m_dict)
+        result['items'] = missions_response
         return result
         
     except HTTPException:
@@ -797,26 +795,6 @@ async def get_pending_missions(
         import traceback
         print(f"🔍 ERROR traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-
-# ===============================================
-# ENDPOINTS ELIMINADOS - REDUNDANTES CON /pendientes
-# ===============================================
-# Los siguientes endpoints fueron eliminados porque /workflow/pendientes
-# ya maneja todos los tipos de usuario y permisos de forma universal:
-#
-# - /workflow/jefe/pendientes
-# - /workflow/tesoreria/pendientes  
-# - /workflow/presupuesto/pendientes
-# - /workflow/contabilidad/pendientes
-# - /workflow/finanzas/pendientes
-# - /workflow/cgr/pendientes
-# - /workflow/custodio/pendientes
-#
-# Todos estos endpoints son redundantes porque /workflow/pendientes:
-# ✅ Funciona para empleados y usuarios financieros
-# ✅ Verifica permisos automáticamente según el rol
-# ✅ Retorna las misiones correctas según los permisos del usuario
-# ✅ Es más simple y mantenible
 
 # ===============================================
 # ENDPOINTS DE CONSULTA Y UTILIDADES

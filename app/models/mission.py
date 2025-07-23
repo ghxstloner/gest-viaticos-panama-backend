@@ -163,7 +163,6 @@ class ItemTransporte(Base):
     origen: Mapped[str] = mapped_column(String(255), nullable=False)
     destino: Mapped[str] = mapped_column(String(255), nullable=False)
     monto: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
-    observaciones: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     mision: Mapped["Mision"] = relationship("Mision", back_populates="items_transporte")
 
@@ -194,11 +193,12 @@ class HistorialFlujo(Base):
     id_usuario_accion: Mapped[int] = mapped_column(Integer, ForeignKey("usuarios.id_usuario"), nullable=False)
     id_estado_anterior: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("estados_flujo.id_estado_flujo"), nullable=True)
     id_estado_nuevo: Mapped[int] = mapped_column(Integer, ForeignKey("estados_flujo.id_estado_flujo"), nullable=False)
-    tipo_accion: Mapped[TipoAccion] = mapped_column(String(20), nullable=False)
+    tipo_accion: Mapped[TipoAccion] = mapped_column(String(20), nullable=False)     
     fecha_accion: Mapped[DateTime] = mapped_column(DateTime, default=func.now())
     comentarios: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     datos_adicionales: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     ip_usuario: Mapped[Optional[str]] = mapped_column(String(45), nullable=True)
+    observacion: Mapped[Optional[str]] = mapped_column(String(45), nullable=True)
 
     mision: Mapped["Mision"] = relationship("Mision", back_populates="historial_flujo")
     usuario_accion: Mapped["Usuario"] = relationship("Usuario", back_populates="historial_flujo")
@@ -230,7 +230,6 @@ class ItemViaticoCompleto(Base):
 
     id_item_viatico_completo: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     id_mision: Mapped[int] = mapped_column(Integer, ForeignKey("misiones.id_mision"), nullable=False)
-    fecha: Mapped[Date] = mapped_column(Date, nullable=False)
     cantidad_dias: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     monto_por_dia: Mapped[Decimal] = mapped_column(Numeric(10, 2), default=0.00, nullable=False)
 

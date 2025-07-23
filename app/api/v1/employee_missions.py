@@ -55,7 +55,7 @@ class TravelExpensesCreateRequest(BaseModel):
     horaSalida: str = Field(..., pattern=r'^([01]?[0-9]|2[0-3]):[0-5][0-9]$')
     fechaRetorno: date
     horaRetorno: str = Field(..., pattern=r'^([01]?[0-9]|2[0-3]):[0-5][0-9]$')
-    categoria: str = Field(..., pattern=r'^(TITULAR|OTROS SERVIDORES PÚBLICOS|OTRAS PERSONAS)$')
+    categoria: str = Field(..., pattern=r'^(TITULAR|OTROS_SERVIDORES_PUBLICOS|OTRAS_PERSONAS)$')
     viaticosCompletos: List[ViaticoCompletoEmployee] = []
     viaticosParciales: List[ViaticoParcialEmployee] = []
     transporteDetalle: List[TransporteDetalleEmployee] = []
@@ -878,6 +878,7 @@ async def update_travel_expenses(
         monto_total = total_result.fetchone().total or Decimal("0.00")
         mision.monto_total_calculado = monto_total
         mision.requiere_refrendo_cgr = monto_total >= Decimal("1000.00")
+        mision.id_estado_flujo = 11 
         
         # Obtener ID de usuario para auditoría
         id_usuario = get_usuario_for_employee(personal_id, db_financiero)

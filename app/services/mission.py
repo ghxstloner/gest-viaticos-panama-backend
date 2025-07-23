@@ -101,15 +101,19 @@ class MissionService:
         mision = self.db.query(Mision).options(
             joinedload(Mision.estado_flujo),
             joinedload(Mision.items_viaticos),
+            joinedload(Mision.items_viaticos_completos),  # <-- Agregado
             joinedload(Mision.items_transporte),
             joinedload(Mision.partidas_presupuestarias),
             joinedload(Mision.historial_flujo).joinedload(HistorialFlujo.usuario_accion).joinedload(Usuario.rol),
             joinedload(Mision.adjuntos),
-            joinedload(Mision.subsanaciones)
+            joinedload(Mision.subsanaciones),
+            joinedload(Mision.items_misiones_exterior),
         ).filter(Mision.id_mision == mission_id).first()
 
         if not mision:
             raise MissionException("Misión no encontrada", status_code=status.HTTP_404_NOT_FOUND)
+
+        print("DEBUG OBSERVACION (service):", getattr(mision, 'observacion', 'NO ATRIBUTO'))
 
         beneficiary_info = self._get_rrhh_data(mision.beneficiario_personal_id)
         preparer_user = self.db.query(Usuario).filter(Usuario.id_usuario == mision.id_usuario_prepara).first()
@@ -119,8 +123,21 @@ class MissionService:
         can_edit = mision.estado_flujo.nombre_estado == "PENDIENTE_REVISION_TESORERIA" and mision.id_usuario_prepara == user.id_usuario
         can_delete = can_edit and len(mision.historial_flujo) <= 1
 
+        # Serializar viaticos completos (siempre presente)
+        viaticos_completos = []
+        for item in getattr(mision, 'items_viaticos_completos', []) or []:
+            viaticos_completos.append({
+                'id_item_viatico_completo': item.id_item_viatico_completo,
+                'id_mision': item.id_mision,
+                'cantidad_dias': item.cantidad_dias,
+                'monto_por_dia': float(item.monto_por_dia)
+            })
+        # Siempre incluir el campo aunque esté vacío
+        mission_dict = Mision.model_validate(mision).model_dump()
+        mission_dict['viaticosCompletos'] = viaticos_completos
+
         return {
-            "mission": mision,
+            "mission": mission_dict,
             "beneficiary": beneficiary_info,
             "preparer": preparer_info,
             "available_actions": available_actions,
