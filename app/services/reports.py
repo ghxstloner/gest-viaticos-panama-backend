@@ -9,11 +9,13 @@ import xlsxwriter
 from ..models.mission import Mision, EstadoFlujo, HistorialFlujo
 from ..models.user import Usuario
 from ..models.enums import TipoMision
+from .pdf_reports import PDFReportService
 
 
 class ReportService:
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, current_user: Optional[Usuario] = None):
         self.db = db
+        self.current_user = current_user
 
     def generate_missions_report(
         self,
@@ -271,8 +273,8 @@ class ReportService:
 
     def _generate_pdf_report(self, missions: List[Mision]) -> io.BytesIO:
         """Generar reporte PDF"""
-        # TODO: Implementar generación de PDF
-        pass
+        pdf_service = PDFReportService(self.db)
+        return pdf_service.generate_missions_pdf_report(missions, self.current_user)
 
     def _get_base_query(self, user: Usuario):
         """Query base según permisos del usuario"""

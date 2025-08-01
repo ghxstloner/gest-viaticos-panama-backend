@@ -114,7 +114,6 @@ class MisionPartidaPresupuestaria(Base):
     id_mision: Mapped[int] = mapped_column(Integer, ForeignKey("misiones.id_mision"), nullable=False)
     codigo_partida: Mapped[str] = mapped_column(String(100), nullable=False)
     monto: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
-    descripcion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     mision: Mapped["Mision"] = relationship("Mision", back_populates="partidas_presupuestarias")
 

@@ -12,3 +12,5 @@ python-dotenv==1.1.1
 xlsxwriter==3.2.0
 aiofiles==24.1.0
 pydantic[email]
+Pillow==10.4.0
+reportlab==4.0.4  

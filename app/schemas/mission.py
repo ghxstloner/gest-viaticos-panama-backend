@@ -58,6 +58,25 @@ class ItemTransporte(ItemTransporteBase):
     model_config = ConfigDict(from_attributes=True)
 
 
+# --- Esquema para Caja Menuda ---
+class MisionCajaMenudaBase(BaseModel):
+    fecha: date
+    hora_de: Optional[str] = None
+    hora_hasta: Optional[str] = None
+    desayuno: Decimal = Field(default=Decimal("0.0"), ge=0)
+    almuerzo: Decimal = Field(default=Decimal("0.0"), ge=0)
+    cena: Decimal = Field(default=Decimal("0.0"), ge=0)
+    transporte: Decimal = Field(default=Decimal("0.0"), ge=0)
+
+class MisionCajaMenudaCreate(MisionCajaMenudaBase):
+    pass
+
+class MisionCajaMenuda(MisionCajaMenudaBase):
+    id_caja_menuda: int
+    id_mision: int
+    model_config = ConfigDict(from_attributes=True)
+
+
 # --- Esquemas específicos para empleados (reutilizables) ---
 class ViaticoCompletoEmployee(BaseModel):
     cantidadDias: int = Field(..., gt=0)
@@ -98,10 +117,13 @@ class CajaMenudaViaticoEmployee(BaseModel):
     def validate_time_range(cls, v, values):
         if 'horaDe' in values:
             from datetime import datetime
-            hora_de = datetime.strptime(values['horaDe'], '%H:%M')
-            hora_hasta = datetime.strptime(v, '%H:%M')
-            if hora_hasta <= hora_de:
-                raise ValueError('La hora hasta debe ser mayor que la hora desde')
+            try:
+                hora_de = datetime.strptime(values['horaDe'], '%H:%M')
+                hora_hasta = datetime.strptime(v, '%H:%M')
+                if hora_hasta <= hora_de:
+                    raise ValueError('La hora hasta debe ser posterior a la hora de')
+            except ValueError:
+                pass  # Si no se puede parsear, no validamos
         return v
 
 
@@ -274,6 +296,7 @@ class Mision(BaseModel):
     partidas_presupuestarias: List[MisionPartidaPresupuestaria] = []
     items_misiones_exterior: List[ItemMisionExterior] = []
     items_viaticos_completos: Optional[List[ItemViaticoCompletoSchema]] = []
+    misiones_caja_menuda: List[MisionCajaMenuda] = []
 
     @validator('categoria_beneficiario', pre=True, always=True)
     def normalize_categoria_beneficiario(cls, v):

@@ -242,3 +242,8 @@ class JefeDirectApprovalRequest(WorkflowActionBase):
 
 class DevolverRequest(BaseModel):
     observacion: str = Field(..., max_length=1000, description="Observación de la devolución/corrección")
+
+# Esquema para crear partidas presupuestarias en el catálogo (cwprecue)
+class PartidaPresupuestariaCatalogoCreate(BaseModel):
+    codigo_partida: str = Field(..., min_length=1, max_length=100, description="Código de la partida presupuestaria")
+    descripcion: str = Field(..., max_length=255, description="Descripción de la partida presupuestaria")

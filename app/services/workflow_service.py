@@ -2,7 +2,7 @@
 
 from typing import List, Dict, Any, Optional, Tuple, Union
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import text, and_, or_
+from sqlalchemy import text, and_, or_, bindparam
 from decimal import Decimal
 from datetime import datetime
 from fastapi import HTTPException, status
@@ -82,8 +82,14 @@ class WorkflowService:
                 'MISSION_EDIT': permissions.get('misiones', {}).get('editar', False),
                 'MISSION_VIEW': permissions.get('misiones', {}).get('ver', False),
                 'MISSION_PAYMMENT': permissions.get('misiones', {}).get('pagar', False),
+                'MISSION_TESORERIA_APPROVE': permissions.get('misiones', {}).get('aprobar_tesoreria', False),
                 'GESTION_SOLICITUDES_VIEW': permissions.get('gestion_solicitudes', {}).get('ver', False),
-                'REPORTS_VIEW': permissions.get('reportes', {}).get('ver', False),
+                'REPORT_EXPORT_VIATICOS': permissions.get('reportes', {}).get('exportar.viaticos', False),
+                'REPORT_EXPORT_CAJA': permissions.get('reportes', {}).get('exportar.caja', False),
+                'MISSION_DIR_FINANZAS_APPROVE': permissions.get('misiones', {}).get('aprobar_finanzas', False),
+                'MISSION_CGR_APPROVE': permissions.get('fiscalizacion', {}).get('aprobar_cgr', False),
+                'MISSION_VIATICOS_PAYMENT': permissions.get('misiones', {}).get('pagar.viaticos', False),
+
             }
             
             result = permission_mapping.get(permission_code, False)
@@ -152,7 +158,7 @@ class WorkflowService:
 
     def _can_pay_missions(self, user: Union[Usuario, dict]) -> bool:
         """Verifica si puede pagar misiones"""
-        return self._has_permission(user, 'MISSION_PAYMMENT')  # Nota: typo en el código original
+        return self._has_permission(user, 'MISSION_PAYMMENT') or self._has_permission(user, 'MISSION_VIATICOS_PAYMENT')
 
     def _can_view_contabilidad(self, user: Union[Usuario, dict]) -> bool:
         """Verifica si puede ver contabilidad"""
@@ -160,7 +166,7 @@ class WorkflowService:
 
     def _can_view_presupuesto(self, user: Union[Usuario, dict]) -> bool:
         """Verifica si puede ver presupuesto"""
-        return self._has_permission(user, 'PRESUPUESTO_VIEW')
+        return self._has_permission(user, 'MISSION_PRESUPUESTO_VIEW')
 
     def _can_view_fiscalizacion(self, user: Union[Usuario, dict]) -> bool:
         """Verifica si puede ver fiscalización"""
@@ -173,6 +179,11 @@ class WorkflowService:
     def _can_view_gestion_solicitudes(self, user: Union[Usuario, dict]) -> bool:
         """Verifica si puede ver gestión de solicitudes"""
         return self._has_permission(user, 'GESTION_SOLICITUDES_VIEW')
+
+    def _can_return_missions(self, user: Union[Usuario, dict]) -> bool:
+        """Verifica si el usuario puede devolver misiones para corrección"""
+        # Verificar permiso específico para subsanar/devolver
+        return self._has_permission(user, 'MISSION_SUBSANAR')
 
     def _is_jefe_inmediato(self, user: Union[Usuario, dict]) -> bool:
         """
@@ -265,11 +276,131 @@ class WorkflowService:
                         "estado_destino": "RECHAZADO",
                         "descripcion": "Rechazar solicitud",
                         "requiere_datos_adicionales": True
+                    }
+                ])
+                   # Agregar acción de devolver si tiene permisos
+                if self._can_return_missions(user):
+                    acciones_disponibles.append({
+                        "accion": "DEVOLVER",
+                        "estado_destino": "DEVUELTO_CORRECCION_JEFE",
+                        "descripcion": "Devolver para corrección al jefe",
+                        "requiere_datos_adicionales": True
+                    })
+        
+        # Estados de devolución específicos - permitir aprobar desde devoluciones
+        elif estado_actual == 'DEVUELTO_CORRECCION_JEFE':
+            if self._is_jefe_inmediato(user):
+                acciones_disponibles.extend([
+                    {
+                        "accion": "APROBAR",
+                        "estado_destino": "PENDIENTE_REVISION_TESORERIA",
+                        "descripcion": "Aprobar solicitud corregida",
+                        "requiere_datos_adicionales": False
                     },
                     {
-                        "accion": "DEVOLVER",
-                        "estado_destino": "DEVUELTO_CORRECCION",
-                        "descripcion": "Devolver para corrección",
+                        "accion": "APROBAR_DIRECTO",
+                        "estado_destino": "APROBADO_PARA_PAGO",
+                        "descripcion": "Aprobar directamente para pago",
+                        "requiere_datos_adicionales": True
+                    },
+                    {
+                        "accion": "RECHAZAR",
+                        "estado_destino": "RECHAZADO",
+                        "descripcion": "Rechazar solicitud corregida",
+                        "requiere_datos_adicionales": True
+                    }
+                ])
+        
+        elif estado_actual == 'DEVUELTO_CORRECCION_TESORERIA':
+            if self._can_view_pagos(user) and self._can_approve_missions(user):
+                if mision.tipo_mision == TipoMision.CAJA_MENUDA:
+                    acciones_disponibles.append({
+                        "accion": "APROBAR",
+                        "estado_destino": "APROBADO_PARA_PAGO",
+                        "descripcion": "Aprobar para pago (Caja Menuda) - Corregido",
+                        "requiere_datos_adicionales": False
+                    })
+                else:
+                    acciones_disponibles.append({
+                        "accion": "APROBAR",
+                        "estado_destino": "PENDIENTE_ASIGNACION_PRESUPUESTO",
+                        "descripcion": "Aprobar y enviar a presupuesto - Corregido",
+                        "requiere_datos_adicionales": False
+                    })
+                
+                acciones_disponibles.extend([
+                    {
+                        "accion": "RECHAZAR",
+                        "estado_destino": "RECHAZADO",
+                        "descripcion": "Rechazar solicitud corregida",
+                        "requiere_datos_adicionales": True
+                    }
+                ])
+        
+        elif estado_actual == 'DEVUELTO_CORRECCION_PRESUPUESTO':
+            if self._can_view_presupuesto(user) and self._can_approve_missions(user):
+                acciones_disponibles.extend([
+                    {
+                        "accion": "APROBAR",
+                        "estado_destino": "PENDIENTE_CONTABILIDAD",
+                        "descripcion": "Asignar presupuesto y aprobar - Corregido",
+                        "requiere_datos_adicionales": True  # Requiere partidas
+                    },
+                    {
+                        "accion": "RECHAZAR",
+                        "estado_destino": "RECHAZADO",
+                        "descripcion": "Rechazar por presupuesto - Corregido",
+                        "requiere_datos_adicionales": True
+                    }
+                ])
+        
+        elif estado_actual == 'DEVUELTO_CORRECCION_CONTABILIDAD':
+            if self._can_view_contabilidad(user) and self._can_approve_missions(user):
+                acciones_disponibles.extend([
+                    {
+                        "accion": "APROBAR",
+                        "estado_destino": "PENDIENTE_APROBACION_FINANZAS",
+                        "descripcion": "Procesar contabilidad - Corregido",
+                        "requiere_datos_adicionales": False
+                    },
+                    {
+                        "accion": "RECHAZAR",
+                        "estado_destino": "RECHAZADO",
+                        "descripcion": "Rechazar por contabilidad - Corregido",
+                        "requiere_datos_adicionales": True
+                    }
+                ])
+        
+        elif estado_actual == 'DEVUELTO_CORRECCION_FINANZAS':
+            if self._can_approve_missions(user):  # Director de Finanzas
+                acciones_disponibles.extend([
+                    {
+                        "accion": "APROBAR",
+                        "estado_destino": "APROBADO_PARA_PAGO",  # O CGR si monto alto
+                        "descripcion": "Aprobación final de finanzas - Corregido",
+                        "requiere_datos_adicionales": True  # Puede requerir monto
+                    },
+                    {
+                        "accion": "RECHAZAR",
+                        "estado_destino": "RECHAZADO",
+                        "descripcion": "Rechazar por finanzas - Corregido",
+                        "requiere_datos_adicionales": True
+                    }
+                ])
+        
+        elif estado_actual == 'DEVUELTO_CORRECCION_CGR':
+            if self._can_view_fiscalizacion(user) and self._can_approve_missions(user):
+                acciones_disponibles.extend([
+                    {
+                        "accion": "APROBAR",
+                        "estado_destino": "APROBADO_PARA_PAGO",
+                        "descripcion": "Refrendar por CGR - Corregido",
+                        "requiere_datos_adicionales": False
+                    },
+                    {
+                        "accion": "RECHAZAR",
+                        "estado_destino": "RECHAZADO",
+                        "descripcion": "Rechazar refrendo CGR - Corregido",
                         "requiere_datos_adicionales": True
                     }
                 ])
@@ -290,6 +421,15 @@ class WorkflowService:
                         "requiere_datos_adicionales": True
                     }
                 ])
+                
+                # Agregar acción de devolver si tiene permisos
+                if self._can_return_missions(user):
+                    acciones_disponibles.append({
+                        "accion": "DEVOLVER",
+                        "estado_destino": "DEVUELTO_CORRECCION_TESORERIA",
+                        "descripcion": "Devolver para corrección a tesorería",
+                        "requiere_datos_adicionales": True
+                    })
         
         elif estado_actual == 'PENDIENTE_CONTABILIDAD':
             if self._can_view_contabilidad(user) and self._can_approve_missions(user):
@@ -307,6 +447,15 @@ class WorkflowService:
                         "requiere_datos_adicionales": True
                     }
                 ])
+                
+                # Agregar acción de devolver si tiene permisos
+                if self._can_return_missions(user):
+                    acciones_disponibles.append({
+                        "accion": "DEVOLVER",
+                        "estado_destino": "DEVUELTO_CORRECCION_PRESUPUESTO",
+                        "descripcion": "Devolver para corrección a presupuesto",
+                        "requiere_datos_adicionales": True
+                    })
         
         elif estado_actual == 'PENDIENTE_APROBACION_FINANZAS':
             if self._can_approve_missions(user):  # Director de Finanzas
@@ -324,6 +473,15 @@ class WorkflowService:
                         "requiere_datos_adicionales": True
                     }
                 ])
+                
+                # Agregar acción de devolver si tiene permisos
+                if self._can_return_missions(user):
+                    acciones_disponibles.append({
+                        "accion": "DEVOLVER",
+                        "estado_destino": "DEVUELTO_CORRECCION_CONTABILIDAD",
+                        "descripcion": "Devolver para corrección a contabilidad",
+                        "requiere_datos_adicionales": True
+                    })
         
         elif estado_actual == 'PENDIENTE_REFRENDO_CGR':
             if self._can_view_fiscalizacion(user) and self._can_approve_missions(user):
@@ -341,6 +499,15 @@ class WorkflowService:
                         "requiere_datos_adicionales": True
                     }
                 ])
+                
+                # Agregar acción de devolver si tiene permisos
+                if self._can_return_missions(user):
+                    acciones_disponibles.append({
+                        "accion": "DEVOLVER",
+                        "estado_destino": "DEVUELTO_CORRECCION_FINANZAS",
+                        "descripcion": "Devolver para corrección a finanzas",
+                        "requiere_datos_adicionales": True
+                    })
         
         elif estado_actual == 'APROBADO_PARA_PAGO':
             if self._can_pay_missions(user):
@@ -350,6 +517,27 @@ class WorkflowService:
                     "descripcion": "Procesar pago",
                     "requiere_datos_adicionales": True  # Requiere datos de pago
                 })
+                
+                # Agregar acción de devolver si tiene permisos
+                if self._can_return_missions(user):
+                    # Determinar el estado de devolución según si requiere CGR
+                    monto_refrendo = self._get_system_configuration('MONTO_REFRENDO_CGR', Decimal('5000.00'))
+                    if isinstance(monto_refrendo, str):
+                        monto_refrendo = Decimal(monto_refrendo)
+                    
+                    if mision.monto_aprobado and mision.monto_aprobado >= monto_refrendo:
+                        estado_devolucion = "DEVUELTO_CORRECCION_CGR"
+                        descripcion = "Devolver para corrección a CGR"
+                    else:
+                        estado_devolucion = "DEVUELTO_CORRECCION_FINANZAS"
+                        descripcion = "Devolver para corrección a finanzas"
+                    
+                    acciones_disponibles.append({
+                        "accion": "DEVOLVER",
+                        "estado_destino": estado_devolucion,
+                        "descripcion": descripcion,
+                        "requiere_datos_adicionales": True
+                    })
         
         elif estado_actual == 'PENDIENTE_FIRMA_ELECTRONICA':
             if self._can_pay_missions(user):
@@ -447,6 +635,19 @@ class WorkflowService:
                 return self._process_payment(mision, transicion, request_data, user)
             elif estado_actual == 'PENDIENTE_FIRMA_ELECTRONICA':
                 return self._process_payment_confirmation(mision, transicion, request_data, user)
+            # Estados de devolución específicos - permitir aprobar desde devoluciones
+            elif estado_actual == 'DEVUELTO_CORRECCION_JEFE':
+                return self._process_jefe_approval(mision, transicion, request_data, user, client_ip)
+            elif estado_actual == 'DEVUELTO_CORRECCION_TESORERIA':
+                return self._process_tesoreria_approval(mision, transicion, request_data, user)
+            elif estado_actual == 'DEVUELTO_CORRECCION_PRESUPUESTO':
+                return self._process_presupuesto_approval(mision, transicion, request_data, user)
+            elif estado_actual == 'DEVUELTO_CORRECCION_CONTABILIDAD':
+                return self._process_contabilidad_approval(mision, transicion, request_data, user)
+            elif estado_actual == 'DEVUELTO_CORRECCION_FINANZAS':
+                return self._process_finanzas_approval(mision, transicion, request_data, user)
+            elif estado_actual == 'DEVUELTO_CORRECCION_CGR':
+                return self._process_cgr_approval(mision, transicion, request_data, user)
         elif accion_str == 'RECHAZAR':
             return self._process_rejection(mision, transicion, request_data, user)
         elif accion_str == 'DEVOLVER':
@@ -468,19 +669,28 @@ class WorkflowService:
         mision: Mision, 
         transicion: TransicionFlujo, 
         request_data: WorkflowActionBase,
-        user: dict,
+        user: Union[Usuario, dict],
         client_ip: Optional[str] = None
     ) -> Dict[str, Any]:
         """Procesa aprobación del jefe inmediato"""
-        self._validate_employee_supervision(mision, user)
+        # Solo validar supervisión si es empleado (dict)
+        if isinstance(user, dict):
+            self._validate_employee_supervision(mision, user)
+            user_name = user.get("apenom", "Jefe Inmediato")
+            user_cedula = user.get('cedula')
+        else:
+            # Para usuarios financieros, no validar supervisión
+            user_name = user.login_username if hasattr(user, 'login_username') else "Usuario Financiero"
+            user_cedula = None
+        
         mision.id_estado_flujo = transicion.id_estado_destino
         self._create_history_record(mision, transicion, request_data, user, client_ip)
         return {
-            'message': f'Solicitud aprobada por {user.get("apenom", "Jefe Inmediato")}',
+            'message': f'Solicitud aprobada por {user_name}',
             'datos_adicionales': {
-                'jefe_cedula': user.get('cedula'),
-                'jefe_nombre': user.get('apenom'),
-                'departamentos_gestionados': user.get('managed_departments', [])
+                'jefe_cedula': user_cedula,
+                'jefe_nombre': user_name,
+                'departamentos_gestionados': user.get('managed_departments', []) if isinstance(user, dict) else []
             }
         }
     
@@ -489,16 +699,24 @@ class WorkflowService:
         mision: Mision, 
         transicion: TransicionFlujo, 
         request_data: JefeRejectionRequest,
-        user: dict
+        user: Union[Usuario, dict]
     ) -> Dict[str, Any]:
         """Procesa rechazo del jefe inmediato"""
-        self._validate_employee_supervision(mision, user)
+        # Solo validar supervisión si es empleado (dict)
+        if isinstance(user, dict):
+            self._validate_employee_supervision(mision, user)
+            user_name = user.get("apenom", "Jefe Inmediato")
+            user_cedula = user.get('cedula')
+        else:
+            # Para usuarios financieros, no validar supervisión
+            user_name = user.login_username if hasattr(user, 'login_username') else "Usuario Financiero"
+            user_cedula = None
         
         return {
-            'message': f'Solicitud rechazada por {user.get("apenom", "Jefe Inmediato")}',
+            'message': f'Solicitud rechazada por {user_name}',
             'datos_adicionales': {
                 'motivo_rechazo': request_data.motivo,
-                'jefe_cedula': user.get('cedula')
+                'jefe_cedula': user_cedula
             }
         }
     
@@ -507,7 +725,7 @@ class WorkflowService:
         mision: Mision, 
         transicion: TransicionFlujo, 
         request_data: WorkflowActionBase,
-        user: Usuario
+        user: Union[Usuario, dict]
     ) -> Dict[str, Any]:
         """Procesa aprobación de tesorería"""
         mensaje = 'Solicitud aprobada por Tesorería'
@@ -525,10 +743,19 @@ class WorkflowService:
         mision.id_estado_flujo = transicion.id_estado_destino
         print(f"DEBUG TESORERIA: transicion.id_estado_destino={transicion.id_estado_destino}")
         
+        # Crear historial de flujo
+        self._create_history_record(mision, transicion, request_data, user, None)
+        
+        # Determinar nombre del usuario
+        if isinstance(user, dict):
+            user_name = user.get('apenom', 'Analista Tesorería')
+        else:
+            user_name = user.login_username if hasattr(user, 'login_username') else "Analista Tesorería"
+        
         return {
             'message': mensaje,
             'datos_adicionales': {
-                'analista_tesoreria': user.login_username,
+                'analista_tesoreria': user_name,
                 'tipo_flujo': 'SIMPLIFICADO' if mision.tipo_mision == TipoMision.CAJA_MENUDA else 'COMPLETO'
             }
         }
@@ -538,7 +765,7 @@ class WorkflowService:
         mision: Mision, 
         transicion: TransicionFlujo, 
         request_data: WorkflowActionBase,
-        user: Usuario
+        user: Union[Usuario, dict]
     ) -> Dict[str, Any]:
         """Procesa confirmación de pago (cuando está en PENDIENTE_FIRMA_ELECTRONICA)"""
         # Ir al estado final PAGADO
@@ -546,10 +773,19 @@ class WorkflowService:
         if estado_pagado:
             transicion.id_estado_destino = estado_pagado.id_estado_flujo
         
+        # Crear historial de flujo
+        self._create_history_record(mision, transicion, request_data, user, None)
+        
+        # Determinar nombre del usuario
+        if isinstance(user, dict):
+            user_name = user.get('apenom', 'Analista Pago')
+        else:
+            user_name = user.login_username if hasattr(user, 'login_username') else "Analista Pago"
+        
         return {
             'message': 'Pago confirmado exitosamente - Proceso completado',
             'datos_adicionales': {
-                'confirmado_por': user.login_username,
+                'confirmado_por': user_name,
                 'fecha_confirmacion': datetime.now().isoformat()
             }
         }
@@ -559,11 +795,23 @@ class WorkflowService:
         mision: Mision, 
         transicion: TransicionFlujo, 
         request_data: PresupuestoActionRequest,
-        user: Usuario
+        user: Union[Usuario, dict]
     ) -> Dict[str, Any]:
         """Procesa asignación de partidas presupuestarias"""
+        mision.id_estado_flujo = transicion.id_estado_destino
+        
         # Validar que las partidas existen en el sistema
         self._validate_budget_items(request_data.partidas)
+        
+        # Obtener el monto total original de la misión
+        monto_total_original = mision.monto_total_calculado
+        
+        # Calcular el monto total de las partidas existentes antes de borrarlas
+        partidas_existentes = self.db.query(MisionPartidaPresupuestaria).filter(
+            MisionPartidaPresupuestaria.id_mision == mision.id_mision
+        ).all()
+        
+        monto_partidas_existentes = sum(partida.monto for partida in partidas_existentes)
         
         # Limpiar partidas existentes
         self.db.query(MisionPartidaPresupuestaria).filter(
@@ -576,18 +824,32 @@ class WorkflowService:
             partida = MisionPartidaPresupuestaria(
                 id_mision=mision.id_mision,
                 codigo_partida=partida_data.codigo_partida,
-                monto=partida_data.monto,
-                descripcion=partida_data.descripcion
+                monto=partida_data.monto
             )
             self.db.add(partida)
             total_asignado += partida_data.monto
         
+        # Actualizar el monto total calculado: restar las partidas antiguas y sumar las nuevas
+        mision.monto_total_calculado = mision.monto_total_calculado - monto_partidas_existentes + total_asignado
+
+        # Crear historial de flujo
+        self._create_history_record(mision, transicion, request_data, user, None)
+        
+        # Determinar nombre del usuario
+        if isinstance(user, dict):
+            user_name = user.get('apenom', 'Analista Presupuesto')
+        else:
+            user_name = user.login_username if hasattr(user, 'login_username') else "Analista Presupuesto"
+        
         return {
-            'message': f'Partidas presupuestarias asignadas. Total: B/. {total_asignado}',
+            'message': f'Partidas presupuestarias asignadas. Total actualizado: B/. {mision.monto_total_calculado} en {len(request_data.partidas)} partidas',
             'datos_adicionales': {
                 'total_asignado': float(total_asignado),
+                'monto_partidas_eliminadas': float(monto_partidas_existentes),
+                'monto_total_anterior': float(monto_total_original),
+                'monto_total_actualizado': float(mision.monto_total_calculado),
                 'cantidad_partidas': len(request_data.partidas),
-                'analista_presupuesto': user.login_username
+                'analista_presupuesto': user_name
             }
         }
     
@@ -596,15 +858,24 @@ class WorkflowService:
         mision: Mision, 
         transicion: TransicionFlujo, 
         request_data: ContabilidadApprovalRequest,
-        user: Usuario
+        user: Union[Usuario, dict]
     ) -> Dict[str, Any]:
-        """Procesa aprobación de contabilidad"""
-        datos_adicionales = {
-            'analista_contabilidad': user.login_username
-        }
+        mision.id_estado_flujo = transicion.id_estado_destino
+        datos_adicionales = {}
+        
+        # Determinar nombre del usuario
+        if isinstance(user, dict):
+            user_name = user.get('apenom', 'Analista Contabilidad')
+        else:
+            user_name = user.login_username if hasattr(user, 'login_username') else "Analista Contabilidad"
+        
+        datos_adicionales['analista_contabilidad'] = user_name
         
         if hasattr(request_data, 'numero_comprobante') and request_data.numero_comprobante:
             datos_adicionales['numero_comprobante'] = request_data.numero_comprobante
+        
+        # Crear historial de flujo
+        self._create_history_record(mision, transicion, request_data, user, None)
         
         return {
             'message': 'Solicitud procesada por Contabilidad',
@@ -616,7 +887,7 @@ class WorkflowService:
         mision: Mision, 
         transicion: TransicionFlujo, 
         request_data: FinanzasApprovalRequest,
-        user: Usuario
+        user: Union[Usuario, dict]
     ) -> Dict[str, Any]:
         """Procesa aprobación final de finanzas"""
         # Si se especifica monto aprobado, actualizarlo
@@ -628,6 +899,8 @@ class WorkflowService:
         
         # Obtener configuración del monto para refrendo CGR
         monto_refrendo_cgr = self._get_system_configuration('MONTO_REFRENDO_CGR', Decimal('5000.00'))
+        if isinstance(monto_refrendo_cgr, str):
+            monto_refrendo_cgr = Decimal(monto_refrendo_cgr)
         
         # Determinar si requiere refrendo CGR basado en el monto
         requiere_cgr = mision.monto_aprobado >= monto_refrendo_cgr
@@ -641,19 +914,30 @@ class WorkflowService:
             estado_cgr = self._states_cache.get('PENDIENTE_REFRENDO_CGR')
             if estado_cgr:
                 transicion.id_estado_destino = estado_cgr.id_estado_flujo
+                mision.id_estado_flujo = estado_cgr.id_estado_flujo  # <-- Forzar cambio de estado
             mensaje = f"Solicitud aprobada por Director Finanzas - Enviada a refrendo CGR (monto: ${mision.monto_aprobado} >= ${monto_refrendo_cgr})"
         else:
             # Si no requiere CGR, ir directo a aprobado para pago
             estado_pago = self._states_cache.get('APROBADO_PARA_PAGO')
             if estado_pago:
                 transicion.id_estado_destino = estado_pago.id_estado_flujo
+                mision.id_estado_flujo = estado_pago.id_estado_flujo  # <-- Forzar cambio de estado
             mensaje = f"Solicitud aprobada por Director Finanzas - Aprobada para pago (monto: ${mision.monto_aprobado} < ${monto_refrendo_cgr})"
         
+        # Crear historial de flujo
+        self._create_history_record(mision, transicion, request_data, user, None)
+        
+        # Determinar nombre del usuario
+        if isinstance(user, dict):
+            user_name = user.get('apenom', 'Director Finanzas')
+        else:
+            user_name = user.login_username if hasattr(user, 'login_username') else "Director Finanzas"
+
         return {
             'message': mensaje,
             'requiere_accion_adicional': requiere_cgr,
             'datos_adicionales': {
-                'director_finanzas': user.login_username,
+                'director_finanzas': user_name,
                 'monto_aprobado': float(mision.monto_aprobado),
                 'monto_refrendo_cgr': float(monto_refrendo_cgr),
                 'requiere_refrendo_cgr': requiere_cgr
@@ -665,20 +949,30 @@ class WorkflowService:
         mision: Mision, 
         transicion: TransicionFlujo, 
         request_data: CGRApprovalRequest,
-        user: Usuario
+        user: Union[Usuario, dict]
     ) -> Dict[str, Any]:
         """Procesa refrendo de CGR"""
         # Forzar que CGR vaya directo a APROBADO_PARA_PAGO
         estado_pago = self._states_cache.get('APROBADO_PARA_PAGO')
         if estado_pago:
             transicion.id_estado_destino = estado_pago.id_estado_flujo
+            mision.id_estado_flujo = estado_pago.id_estado_flujo  # <-- Forzar cambio de estado
         
-        datos_adicionales = {
-            'fiscalizador_cgr': user.login_username
-        }
+        datos_adicionales = {}
+        
+        # Determinar nombre del usuario
+        if isinstance(user, dict):
+            user_name = user.get('apenom', 'Fiscalizador CGR')
+        else:
+            user_name = user.login_username if hasattr(user, 'login_username') else "Fiscalizador CGR"
+        
+        datos_adicionales['fiscalizador_cgr'] = user_name
         
         if hasattr(request_data, 'numero_refrendo') and request_data.numero_refrendo:
             datos_adicionales['numero_refrendo'] = request_data.numero_refrendo
+        
+        # Crear historial de flujo
+        self._create_history_record(mision, transicion, request_data, user, None)
         
         return {
             'message': 'Refrendo CGR completado exitosamente - Solicitud aprobada para pago',
@@ -690,7 +984,7 @@ class WorkflowService:
         mision: Mision, 
         transicion: TransicionFlujo, 
         request_data: PaymentProcessRequest,
-        user: Usuario
+        user: Union[Usuario, dict]
     ) -> Dict[str, Any]:
         """Procesa el pago de la misión"""
 
@@ -731,7 +1025,7 @@ class WorkflowService:
             tipo_accion="APROBAR",
             comentarios=request_data.comentarios,
             datos_adicionales={
-                'procesado_por': user.login_username,
+                'procesado_por': user.login_username if isinstance(user, Usuario) else user.get('apenom', 'Analista Pago'),
                 'metodo_pago': request_data.metodo_pago,
                 'monto_pagado': float(mision.monto_aprobado),
                 'numero_transaccion': getattr(request_data, 'numero_transaccion', None),
@@ -745,7 +1039,7 @@ class WorkflowService:
 
         # Preparar datos adicionales para respuesta
         datos_adicionales = {
-            'procesado_por': user.login_username,
+            'procesado_por': user.login_username if isinstance(user, Usuario) else user.get('apenom', 'Analista Pago'),
             'metodo_pago': request_data.metodo_pago,
             'monto_pagado': float(mision.monto_aprobado)
         }
@@ -787,6 +1081,9 @@ class WorkflowService:
         if observacion:
             datos_adicionales['observacion'] = observacion
 
+        # Crear historial de flujo
+        self._create_history_record(mision, transicion, request_data, user, None)
+
         return {
             'message': f'Solicitud devuelta para corrección por {user_name}',
             'requiere_accion_adicional': True,
@@ -803,6 +1100,9 @@ class WorkflowService:
         """Procesa rechazo definitivo"""
         user_name = user.get('apenom') if isinstance(user, dict) else user.login_username
         
+        # Crear historial de flujo
+        self._create_history_record(mision, transicion, request_data, user, None)
+
         return {
             'message': f'Solicitud rechazada definitivamente por {user_name}'
         }
@@ -816,7 +1116,7 @@ class WorkflowService:
         
         try:
             result = self.db_rrhh.execute(text("""
-                SELECT CodCue, DesCue
+                SELECT CodCue, Denominacion
                 FROM aitsa_rrhh.cwprecue 
                 ORDER BY CodCue
             """))
@@ -825,10 +1125,9 @@ class WorkflowService:
             for row in result.fetchall():
                 partidas.append(PartidaPresupuestariaResponse(
                     codigo_partida=row.CodCue,
-                    descripcion=row.DesCue,
+                    descripcion=row.Denominacion,
                     es_activa=True
                 ))
-            
             return partidas
             
         except Exception as e:
@@ -905,25 +1204,72 @@ class WorkflowService:
         
         if self._is_jefe_inmediato(user):
             target_states.append('PENDIENTE_JEFE')
+            # Jefes pueden ver sus propias devoluciones
+            if self._has_permission(user, 'MISSION_APPROVE'):
+                target_states.append('DEVUELTO_CORRECCION_JEFE')
         
         if self._can_view_pagos(user) and self._can_approve_missions(user):
             target_states.extend(['PENDIENTE_REVISION_TESORERIA', 'PENDIENTE_FIRMA_ELECTRONICA'])
+        # Permitir a usuarios con permiso MISSION_TESORERIA_APPROVE ver PENDIENTE_REVISION_TESORERIA
+        if self._has_permission(user, 'MISSION_TESORERIA_APPROVE') and 'PENDIENTE_REVISION_TESORERIA' not in target_states:
+            target_states.append('PENDIENTE_REVISION_TESORERIA')
+            # Tesorería puede ver devoluciones de tesorería
+            target_states.append('DEVUELTO_CORRECCION_TESORERIA')
         
-        if self._can_view_presupuesto(user) and self._can_approve_missions(user):
+        # Solo permitir ver PENDIENTE_ASIGNACION_PRESUPUESTO si tiene el permiso MISSION_PRESUPUESTO_VIEW
+        if self._has_permission(user, 'MISSION_PRESUPUESTO_VIEW'):  
             target_states.append('PENDIENTE_ASIGNACION_PRESUPUESTO')
+            # Presupuesto puede ver devoluciones de presupuesto
+            target_states.append('DEVUELTO_CORRECCION_PRESUPUESTO')
         
-        if self._can_view_contabilidad(user) and self._can_approve_missions(user):
+        if self._can_view_contabilidad(user):
             target_states.append('PENDIENTE_CONTABILIDAD')
+            # Contabilidad puede ver devoluciones de contabilidad
+            target_states.append('DEVUELTO_CORRECCION_CONTABILIDAD')
         
-        if self._can_approve_missions(user):
+        # Agregar PENDIENTE_APROBACION_FINANZAS si tiene el permiso MISSION_DIR_FINANZAS_APPROVE
+        if self._has_permission(user, 'MISSION_DIR_FINANZAS_APPROVE') and 'PENDIENTE_APROBACION_FINANZAS' not in target_states:
             target_states.append('PENDIENTE_APROBACION_FINANZAS')
+            # Finanzas puede ver devoluciones de finanzas
+            target_states.append('DEVUELTO_CORRECCION_FINANZAS')
+        elif self._can_approve_missions(user):
+            target_states.append('PENDIENTE_APROBACION_FINANZAS')
+            # Si tiene permiso general de aprobación, puede ver devoluciones de finanzas
+            target_states.append('DEVUELTO_CORRECCION_FINANZAS')
+
+        if self._has_permission(user, 'MISSION_CGR_APPROVE') and 'PENDIENTE_REFRENDO_CGR' not in target_states:
+            target_states.append('PENDIENTE_REFRENDO_CGR')
+            # CGR puede ver devoluciones de CGR
+            target_states.append('DEVUELTO_CORRECCION_CGR')
+            
         
         if self._can_view_fiscalizacion(user) and self._can_approve_missions(user):
             target_states.append('PENDIENTE_REFRENDO_CGR')
+            # Si tiene permisos de fiscalización, puede ver devoluciones de CGR
+            target_states.append('DEVUELTO_CORRECCION_CGR')
         
         if self._can_pay_missions(user):
             target_states.append('APROBADO_PARA_PAGO')
             target_states.append('PAGADO')
+        
+        # Agregar estados de devolución específicos según permisos
+        if self._has_permission(user, 'MISSION_APPROVE'):
+            target_states.append('DEVUELTO_CORRECCION_JEFE')
+        
+        if self._has_permission(user, 'MISSION_TESORERIA_APPROVE'):
+            target_states.append('DEVUELTO_CORRECCION_TESORERIA')
+        
+        if self._has_permission(user, 'MISSION_PRESUPUESTO_VIEW'):
+            target_states.append('DEVUELTO_CORRECCION_PRESUPUESTO')
+        
+        if self._has_permission(user, 'CONTABILIDAD_VIEW'):
+            target_states.append('DEVUELTO_CORRECCION_CONTABILIDAD')
+        
+        if self._has_permission(user, 'MISSION_DIR_FINANZAS_APPROVE'):
+            target_states.append('DEVUELTO_CORRECCION_FINANZAS')
+        
+        if self._has_permission(user, 'MISSION_CGR_APPROVE'):
+            target_states.append('DEVUELTO_CORRECCION_CGR')
         
         if not target_states:
             return {
@@ -935,32 +1281,40 @@ class WorkflowService:
                 'stats': {'total_pendientes': 0, 'urgentes': 0, 'antiguos': 0}
             }
         
-        # Debug logging
-        print(f"DEBUG WorkflowService - target_states: {target_states}")
-        print(f"DEBUG WorkflowService - user type: {type(user)}")
-        
-        # Construir query base
+        # --- LÓGICA CORREGIDA PARA ESTADOS DE PAGO ---
+        pago_filters = []
+        if 'APROBADO_PARA_PAGO' in target_states:
+            if self._has_permission(user, 'MISSION_VIATICOS_PAYMENT'):
+                pago_filters.append(and_(EstadoFlujo.nombre_estado == 'APROBADO_PARA_PAGO', Mision.tipo_mision == TipoMision.VIATICOS))
+            if self._has_permission(user, 'MISSION_PAYMMENT'):
+                pago_filters.append(and_(EstadoFlujo.nombre_estado == 'APROBADO_PARA_PAGO', Mision.tipo_mision == TipoMision.CAJA_MENUDA))
+        if 'PAGADO' in target_states:
+            if self._has_permission(user, 'MISSION_VIATICOS_PAYMENT'):
+                pago_filters.append(and_(EstadoFlujo.nombre_estado == 'PAGADO', Mision.tipo_mision == TipoMision.VIATICOS))
+            if self._has_permission(user, 'MISSION_PAYMMENT'):
+                pago_filters.append(and_(EstadoFlujo.nombre_estado == 'PAGADO', Mision.tipo_mision == TipoMision.CAJA_MENUDA))
+        # Quitar los estados de pago de non_pago_states para que no se dupliquen
+        non_pago_states = [s for s in target_states if s not in ['APROBADO_PARA_PAGO', 'PAGADO']]
+        print(f"DEBUG pago_filters: {pago_filters}")
+        print(f"DEBUG filters recibidos: {filters}")
         query = self.db.query(Mision).options(
             joinedload(Mision.estado_flujo)
-        ).join(EstadoFlujo, Mision.id_estado_flujo == EstadoFlujo.id_estado_flujo).filter(
-            EstadoFlujo.nombre_estado.in_(target_states)
-        )
+        ).join(EstadoFlujo, Mision.id_estado_flujo == EstadoFlujo.id_estado_flujo)
+        # Si hay estados normales y filtros de pago, unirlos con OR
+        if non_pago_states and pago_filters:
+            query = query.filter(or_(EstadoFlujo.nombre_estado.in_(non_pago_states), *pago_filters))
+        elif pago_filters:
+            query = query.filter(or_(*pago_filters))
+        elif non_pago_states:
+            query = query.filter(EstadoFlujo.nombre_estado.in_(non_pago_states))
+        else:
+            # Si no hay nada, devolver vacío
+            query = query.filter(text('1=0'))
         
         # Aplicar filtros específicos por permisos
         if self._is_jefe_inmediato(user) and isinstance(user, dict):
             # Para jefes, solo mostrar solicitudes de sus subordinados
             query = self._apply_supervisor_filter(query, user)
-        elif self._can_pay_missions(user) and ('APROBADO_PARA_PAGO' in target_states or 'PAGADO' in target_states):
-            # Para custodios, mostrar caja menuda listas para pago y pagadas
-            query = query.filter(
-                or_(
-                    EstadoFlujo.nombre_estado.notin_(['APROBADO_PARA_PAGO', 'PAGADO']),
-                    and_(
-                        EstadoFlujo.nombre_estado.in_(['APROBADO_PARA_PAGO', 'PAGADO']),
-                        Mision.tipo_mision == TipoMision.CAJA_MENUDA
-                    )
-                )
-            )
         
         # Aplicar filtros generales
         if filters.get('search'):
@@ -993,8 +1347,8 @@ class WorkflowService:
         if filters.get('monto_max'):
             query = query.filter(Mision.monto_total_calculado <= filters['monto_max'])
         
-        # Ordenar por fecha de creación (más antiguos primero para priorizar)
-        query = query.order_by(Mision.created_at.asc())
+        # Ordenar por fecha de creación (más recientes primero)
+        query = query.order_by(Mision.created_at.desc())
         
         # Obtener total para paginación
         total_count = query.count()
@@ -1009,20 +1363,15 @@ class WorkflowService:
         # Calcular estadísticas básicas simplificadas
         total_query = self.db.query(Mision).join(
             EstadoFlujo, Mision.id_estado_flujo == EstadoFlujo.id_estado_flujo
-        ).filter(EstadoFlujo.nombre_estado.in_(target_states))
-        
-        if self._is_jefe_inmediato(user) and isinstance(user, dict):
-            total_query = self._apply_supervisor_filter(total_query, user)
-        elif self._can_pay_missions(user) and ('APROBADO_PARA_PAGO' in target_states or 'PAGADO' in target_states):
-            total_query = total_query.filter(
-                or_(
-                    EstadoFlujo.nombre_estado.notin_(['APROBADO_PARA_PAGO', 'PAGADO']),
-                    and_(
-                        EstadoFlujo.nombre_estado.in_(['APROBADO_PARA_PAGO', 'PAGADO']),
-                        Mision.tipo_mision == TipoMision.CAJA_MENUDA
-                    )
-                )
-            )
+        )
+        if non_pago_states and pago_filters:
+            total_query = total_query.filter(or_(EstadoFlujo.nombre_estado.in_(non_pago_states), *pago_filters))
+        elif pago_filters:
+            total_query = total_query.filter(or_(*pago_filters))
+        elif non_pago_states:
+            total_query = total_query.filter(EstadoFlujo.nombre_estado.in_(non_pago_states))
+        else:
+            total_query = total_query.filter(text('1=0'))
         
         stats = {
             'total_pendientes': total_query.count(),
@@ -1136,7 +1485,13 @@ class WorkflowService:
                 else:
                     return self._states_cache['PENDIENTE_ASIGNACION_PRESUPUESTO'].id_estado_flujo
             elif estado_actual == 'PENDIENTE_ASIGNACION_PRESUPUESTO':
-                return self._states_cache['PENDIENTE_CONTABILIDAD'].id_estado_flujo
+                print("DEBUG: _states_cache keys:", list(self._states_cache.keys()))
+                print("DEBUG: PENDIENTE_CONTABILIDAD in cache?", 'PENDIENTE_CONTABILIDAD' in self._states_cache)
+                if 'PENDIENTE_CONTABILIDAD' in self._states_cache:
+                    return self._states_cache['PENDIENTE_CONTABILIDAD'].id_estado_flujo
+                else:
+                    print("ERROR: Estado 'PENDIENTE_CONTABILIDAD' no encontrado en _states_cache")
+                    return mision.id_estado_flujo
             elif estado_actual == 'PENDIENTE_CONTABILIDAD':
                 return self._states_cache['PENDIENTE_APROBACION_FINANZAS'].id_estado_flujo
             elif estado_actual == 'PENDIENTE_APROBACION_FINANZAS':
@@ -1145,28 +1500,192 @@ class WorkflowService:
                 return self._states_cache['APROBADO_PARA_PAGO'].id_estado_flujo
             elif estado_actual == 'APROBADO_PARA_PAGO':
                 return self._states_cache['PAGADO'].id_estado_flujo
+            # Estados de devolución específicos - permitir aprobar desde devoluciones
+            elif estado_actual == 'DEVUELTO_CORRECCION_JEFE':
+                return self._states_cache['PENDIENTE_REVISION_TESORERIA'].id_estado_flujo
+            elif estado_actual == 'DEVUELTO_CORRECCION_TESORERIA':
+                if mision.tipo_mision == TipoMision.CAJA_MENUDA:
+                    return self._states_cache['APROBADO_PARA_PAGO'].id_estado_flujo
+                else:
+                    return self._states_cache['PENDIENTE_ASIGNACION_PRESUPUESTO'].id_estado_flujo
+            elif estado_actual == 'DEVUELTO_CORRECCION_PRESUPUESTO':
+                return self._states_cache['PENDIENTE_CONTABILIDAD'].id_estado_flujo
+            elif estado_actual == 'DEVUELTO_CORRECCION_CONTABILIDAD':
+                return self._states_cache['PENDIENTE_APROBACION_FINANZAS'].id_estado_flujo
+            elif estado_actual == 'DEVUELTO_CORRECCION_FINANZAS':
+                return self._states_cache['APROBADO_PARA_PAGO'].id_estado_flujo
+            elif estado_actual == 'DEVUELTO_CORRECCION_CGR':
+                return self._states_cache['APROBADO_PARA_PAGO'].id_estado_flujo
         elif action_upper == 'RECHAZAR':
             return self._states_cache['RECHAZADO'].id_estado_flujo
         elif action_upper == 'DEVOLVER':
-            return self._states_cache['DEVUELTO_CORRECCION'].id_estado_flujo
+            # Nueva lógica de devolución específica según el estado actual
+            return self._determine_return_state(estado_actual, mision)
         elif action_upper == 'APROBAR_DIRECTO':
             return self._states_cache['APROBADO_PARA_PAGO'].id_estado_flujo
         
         # Estado por defecto
         return mision.id_estado_flujo
     
+    def _determine_return_state(self, estado_actual: str, mision: Mision) -> int:
+        """
+        Determina el estado de devolución específico según el estado actual.
+        Implementa la lógica de devolución según el flujo de trabajo.
+        """
+        if estado_actual == 'PENDIENTE_JEFE':
+            # Si está en PENDIENTE JEFE, devuelve a DEVUELTO_CORRECCION (estado general)
+            return self._states_cache['DEVUELTO_CORRECCION'].id_estado_flujo
+        
+        elif estado_actual == 'PENDIENTE_REVISION_TESORERIA':
+            # Si está en PENDIENTE TESORERIA, pasa a DEVUELTO_CORRECCION_JEFE
+            if 'DEVUELTO_CORRECCION_JEFE' in self._states_cache:
+                return self._states_cache['DEVUELTO_CORRECCION_JEFE'].id_estado_flujo
+            else:
+                # Fallback a DEVUELTO_CORRECCION si no existe DEVUELTO_CORRECCION_JEFE
+                return self._states_cache['DEVUELTO_CORRECCION'].id_estado_flujo
+        
+        elif estado_actual == 'PENDIENTE_ASIGNACION_PRESUPUESTO':
+            # Si está en PENDIENTE PRESUPUESTO, pasa a DEVUELTO_CORRECCION_TESORERIA
+            if 'DEVUELTO_CORRECCION_TESORERIA' in self._states_cache:
+                return self._states_cache['DEVUELTO_CORRECCION_TESORERIA'].id_estado_flujo
+            else:
+                # Fallback a DEVUELTO_CORRECCION si no existe DEVUELTO_CORRECCION_TESORERIA
+                return self._states_cache['DEVUELTO_CORRECCION'].id_estado_flujo
+        
+        elif estado_actual == 'PENDIENTE_CONTABILIDAD':
+            # Si está en PENDIENTE CONTABILIDAD, pasa a DEVUELTO_CORRECCION_PRESUPUESTO
+            if 'DEVUELTO_CORRECCION_PRESUPUESTO' in self._states_cache:
+                return self._states_cache['DEVUELTO_CORRECCION_PRESUPUESTO'].id_estado_flujo
+            else:
+                # Fallback a DEVUELTO_CORRECCION si no existe DEVUELTO_CORRECCION_PRESUPUESTO
+                return self._states_cache['DEVUELTO_CORRECCION'].id_estado_flujo
+        
+        elif estado_actual == 'PENDIENTE_APROBACION_FINANZAS':
+            # Si está en PENDIENTE FINANZAS, pasa a DEVUELTO_CORRECCION_CONTABILIDAD
+            if 'DEVUELTO_CORRECCION_CONTABILIDAD' in self._states_cache:
+                return self._states_cache['DEVUELTO_CORRECCION_CONTABILIDAD'].id_estado_flujo
+            else:
+                # Fallback a DEVUELTO_CORRECCION si no existe DEVUELTO_CORRECCION_CONTABILIDAD
+                return self._states_cache['DEVUELTO_CORRECCION'].id_estado_flujo
+        
+        elif estado_actual == 'PENDIENTE_REFRENDO_CGR':
+            # Si está en PENDIENTE CGR, pasa a DEVUELTO_CORRECCION_FINANZAS
+            if 'DEVUELTO_CORRECCION_FINANZAS' in self._states_cache:
+                return self._states_cache['DEVUELTO_CORRECCION_FINANZAS'].id_estado_flujo
+            else:
+                # Fallback a DEVUELTO_CORRECCION si no existe DEVUELTO_CORRECCION_FINANZAS
+                return self._states_cache['DEVUELTO_CORRECCION'].id_estado_flujo
+        
+        elif estado_actual == 'APROBADO_PARA_PAGO':
+            # Si está en APROBADO PAGO, determina si va a DEVUELTO_CORRECCION_CGR o DEVUELTO_CORRECCION_FINANZAS
+            # según la misma validación que determina si va a PENDIENTE_CGR
+            monto_refrendo = self._get_system_configuration('MONTO_REFRENDO_CGR', 5000.0)
+            
+            if mision.monto_aprobado and float(mision.monto_aprobado) > float(monto_refrendo):
+                # Si el monto requiere refrendo CGR, devuelve a DEVUELTO_CORRECCION_CGR
+                if 'DEVUELTO_CORRECCION_CGR' in self._states_cache:
+                    return self._states_cache['DEVUELTO_CORRECCION_CGR'].id_estado_flujo
+                else:
+                    # Fallback a DEVUELTO_CORRECCION_FINANZAS si no existe DEVUELTO_CORRECCION_CGR
+                    if 'DEVUELTO_CORRECCION_FINANZAS' in self._states_cache:
+                        return self._states_cache['DEVUELTO_CORRECCION_FINANZAS'].id_estado_flujo
+                    else:
+                        return self._states_cache['DEVUELTO_CORRECCION'].id_estado_flujo
+            else:
+                # Si no requiere refrendo CGR, devuelve a DEVUELTO_CORRECCION_FINANZAS
+                if 'DEVUELTO_CORRECCION_FINANZAS' in self._states_cache:
+                    return self._states_cache['DEVUELTO_CORRECCION_FINANZAS'].id_estado_flujo
+                else:
+                    return self._states_cache['DEVUELTO_CORRECCION'].id_estado_flujo
+        
+        # Estados de devolución - cuando ya está devuelto, devolver al estado anterior
+        elif estado_actual == 'DEVUELTO_CORRECCION_CGR':
+            # Si está en DEVUELTO CGR, pasa a DEVUELTO_CORRECCION_FINANZAS
+            if 'DEVUELTO_CORRECCION_FINANZAS' in self._states_cache:
+                return self._states_cache['DEVUELTO_CORRECCION_FINANZAS'].id_estado_flujo
+            else:
+                return self._states_cache['DEVUELTO_CORRECCION'].id_estado_flujo
+        
+        elif estado_actual == 'DEVUELTO_CORRECCION_FINANZAS':
+            # Si está en DEVUELTO FINANZAS, pasa a DEVUELTO_CORRECCION_CONTABILIDAD
+            if 'DEVUELTO_CORRECCION_CONTABILIDAD' in self._states_cache:
+                return self._states_cache['DEVUELTO_CORRECCION_CONTABILIDAD'].id_estado_flujo
+            else:
+                return self._states_cache['DEVUELTO_CORRECCION'].id_estado_flujo
+        
+        elif estado_actual == 'DEVUELTO_CORRECCION_CONTABILIDAD':
+            # Si está en DEVUELTO CONTABILIDAD, pasa a DEVUELTO_CORRECCION_PRESUPUESTO
+            if 'DEVUELTO_CORRECCION_PRESUPUESTO' in self._states_cache:
+                return self._states_cache['DEVUELTO_CORRECCION_PRESUPUESTO'].id_estado_flujo
+            else:
+                return self._states_cache['DEVUELTO_CORRECCION'].id_estado_flujo
+        
+        elif estado_actual == 'DEVUELTO_CORRECCION_PRESUPUESTO':
+            # Si está en DEVUELTO PRESUPUESTO, pasa a DEVUELTO_CORRECCION_TESORERIA
+            if 'DEVUELTO_CORRECCION_TESORERIA' in self._states_cache:
+                return self._states_cache['DEVUELTO_CORRECCION_TESORERIA'].id_estado_flujo
+            else:
+                return self._states_cache['DEVUELTO_CORRECCION'].id_estado_flujo
+        
+        elif estado_actual == 'DEVUELTO_CORRECCION_TESORERIA':
+            # Si está en DEVUELTO TESORERIA, pasa a DEVUELTO_CORRECCION_JEFE
+            if 'DEVUELTO_CORRECCION_JEFE' in self._states_cache:
+                return self._states_cache['DEVUELTO_CORRECCION_JEFE'].id_estado_flujo
+            else:
+                return self._states_cache['DEVUELTO_CORRECCION'].id_estado_flujo
+        
+        elif estado_actual == 'DEVUELTO_CORRECCION_JEFE':
+            # Si está en DEVUELTO JEFE, pasa a DEVUELTO_CORRECCION (estado general)
+            return self._states_cache['DEVUELTO_CORRECCION'].id_estado_flujo
+        
+        # Para cualquier otro estado, usar DEVUELTO_CORRECCION como fallback
+        return self._states_cache['DEVUELTO_CORRECCION'].id_estado_flujo
+    
     def _can_perform_action(self, estado_actual: str, action: str, user: Union[Usuario, dict]) -> bool:
         """Verifica si el usuario puede realizar una acción específica en el estado actual"""
         action_upper = action.upper()
         
-        if estado_actual == 'BORRADOR' or estado_actual == 'DEVUELTO_CORRECCION':
+        # Estados editables (solo BORRADOR y DEVUELTO_CORRECCION general)
+        estados_editables = ['BORRADOR', 'DEVUELTO_CORRECCION']
+        
+        if estado_actual in estados_editables:
             return action_upper == 'ENVIAR' and (
                 self._has_permission(user, 'MISSION_CREATE') or 
                 self._has_permission(user, 'MISSION_EDIT')
             )
         
         elif estado_actual == 'PENDIENTE_JEFE':
-            return self._is_jefe_inmediato(user) and action_upper in ['APROBAR', 'RECHAZAR', 'DEVOLVER', 'APROBAR_DIRECTO']
+            is_jefe = self._is_jefe_inmediato(user)
+            print(f"🔍 DEBUG _can_perform_action - PENDIENTE_JEFE: is_jefe={is_jefe}, action_upper={action_upper}")
+            return is_jefe and action_upper in ['APROBAR', 'RECHAZAR', 'DEVOLVER', 'APROBAR_DIRECTO']
+        
+        elif estado_actual == 'DEVUELTO_CORRECCION_JEFE':
+            is_jefe = self._is_jefe_inmediato(user)
+            return is_jefe and action_upper in ['APROBAR', 'RECHAZAR', 'APROBAR_DIRECTO', 'DEVOLVER']
+        
+        elif estado_actual == 'DEVUELTO_CORRECCION_TESORERIA':
+            return (
+                self._has_permission(user, 'MISSION_TESORERIA_APPROVE')
+                and action_upper in ['APROBAR', 'RECHAZAR', 'DEVOLVER']
+            )
+        
+        elif estado_actual == 'DEVUELTO_CORRECCION_PRESUPUESTO':
+            return (self._can_view_presupuesto(user) and action_upper in ['APROBAR', 'RECHAZAR', 'DEVOLVER'])
+        
+        elif estado_actual == 'DEVUELTO_CORRECCION_CONTABILIDAD':
+            return (self._can_view_contabilidad(user) and action_upper in ['APROBAR', 'RECHAZAR', 'DEVOLVER'])
+        
+        elif estado_actual == 'DEVUELTO_CORRECCION_FINANZAS':
+            return (
+                (self._can_approve_missions(user) or self._has_permission(user, 'MISSION_DIR_FINANZAS_APPROVE'))
+                and action_upper in ['APROBAR', 'RECHAZAR', 'DEVOLVER']
+            )
+        
+        elif estado_actual == 'DEVUELTO_CORRECCION_CGR':
+            return (
+                (self._can_view_fiscalizacion(user) and self._can_approve_missions(user) or self._has_permission(user, 'MISSION_CGR_APPROVE'))
+                and action_upper in ['APROBAR', 'RECHAZAR', 'DEVOLVER']
+            )
         
         elif estado_actual == 'PENDIENTE_REVISION_TESORERIA':
             return (
@@ -1175,22 +1694,25 @@ class WorkflowService:
             )
         
         elif estado_actual == 'PENDIENTE_ASIGNACION_PRESUPUESTO':
-            return (self._can_view_presupuesto(user) and self._can_approve_missions(user) and 
-                   action_upper in ['APROBAR', 'RECHAZAR'])
+            return (self._can_view_presupuesto(user) and action_upper in ['APROBAR', 'RECHAZAR', 'DEVOLVER'])
         
         elif estado_actual == 'PENDIENTE_CONTABILIDAD':
-            return (self._can_view_contabilidad(user) and self._can_approve_missions(user) and 
-                   action_upper in ['APROBAR', 'RECHAZAR'])
+            return (self._can_view_contabilidad(user) and action_upper in ['APROBAR', 'RECHAZAR', 'DEVOLVER'])
         
         elif estado_actual == 'PENDIENTE_APROBACION_FINANZAS':
-            return (self._can_approve_missions(user) and action_upper in ['APROBAR', 'RECHAZAR'])
+            return (
+                (self._can_approve_missions(user) or self._has_permission(user, 'MISSION_DIR_FINANZAS_APPROVE'))
+                and action_upper in ['APROBAR', 'RECHAZAR', 'DEVOLVER']
+            )
         
         elif estado_actual == 'PENDIENTE_REFRENDO_CGR':
-            return (self._can_view_fiscalizacion(user) and self._can_approve_missions(user) and 
-                   action_upper in ['APROBAR', 'RECHAZAR'])
+            return (
+                (self._can_view_fiscalizacion(user) and self._can_approve_missions(user) or self._has_permission(user, 'MISSION_CGR_APPROVE'))
+                and action_upper in ['APROBAR', 'RECHAZAR', 'DEVOLVER']
+            )
         
         elif estado_actual == 'APROBADO_PARA_PAGO':
-            return (self._can_pay_missions(user) and action_upper in ['APROBAR', 'PROCESAR_PAGO'])
+            return (self._can_pay_missions(user) and action_upper in ['APROBAR', 'PROCESAR_PAGO', 'DEVOLVER'])
         
         elif estado_actual == 'PENDIENTE_FIRMA_ELECTRONICA':
             return (self._can_pay_missions(user) and action_upper in ['APROBAR', 'CONFIRMAR_PAGO'])
@@ -1228,10 +1750,10 @@ class WorkflowService:
         
         codigos = [p.codigo_partida for p in partidas]
         
-        result = self.db_rrhh.execute(text("""
-            SELECT CodCue FROM aitsa_rrhh.cwprecue 
-            WHERE CodCue IN :codigos
-        """), {"codigos": tuple(codigos)})
+        result = self.db_rrhh.execute(
+            text("SELECT CodCue FROM aitsa_rrhh.cwprecue WHERE CodCue IN :codigos").bindparams(bindparam("codigos", expanding=True)),
+            {"codigos": codigos}
+        )
         
         codigos_validos = [row.CodCue for row in result.fetchall()]
         codigos_invalidos = [c for c in codigos if c not in codigos_validos]
@@ -1294,6 +1816,15 @@ class WorkflowService:
         """Crea un registro en el historial de flujo"""
         user_id = user.id_usuario if isinstance(user, Usuario) else 1  # Usuario sistema para empleados
         
+        # Determinar qué usar como observación
+        observacion = None
+        if hasattr(request_data, 'observacion') and request_data.observacion:
+            observacion = request_data.observacion
+        elif hasattr(request_data, 'comentarios') and request_data.comentarios:
+            observacion = request_data.comentarios
+        elif hasattr(request_data, 'motivo') and request_data.motivo:
+            observacion = request_data.motivo
+        
         historial = HistorialFlujo(
             id_mision=mision.id_mision,
             id_usuario_accion=user_id,
@@ -1301,6 +1832,7 @@ class WorkflowService:
             id_estado_nuevo=transicion.id_estado_destino,
             tipo_accion=transicion.tipo_accion,
             comentarios=request_data.comentarios,
+            observacion=observacion,
             datos_adicionales=request_data.datos_adicionales,
             ip_usuario=client_ip
         )
@@ -1374,6 +1906,15 @@ class WorkflowService:
         """Crea un registro manual en el historial"""
         user_id = user.id_usuario if isinstance(user, Usuario) else 1
         
+        # Determinar qué usar como observación
+        observacion = None
+        if hasattr(request_data, 'observacion') and request_data.observacion:
+            observacion = request_data.observacion
+        elif hasattr(request_data, 'comentarios') and request_data.comentarios:
+            observacion = request_data.comentarios
+        elif hasattr(request_data, 'motivo') and request_data.motivo:
+            observacion = request_data.motivo
+        
         historial = HistorialFlujo(
             id_mision=mision.id_mision,
             id_usuario_accion=user_id,
@@ -1381,6 +1922,7 @@ class WorkflowService:
             id_estado_nuevo=estado_nuevo_id,
             tipo_accion=accion,
             comentarios=getattr(request_data, 'comentarios', None),
+            observacion=observacion,
             datos_adicionales=getattr(request_data, 'datos_adicionales', None),
             ip_usuario=client_ip
         )

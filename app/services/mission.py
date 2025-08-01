@@ -191,9 +191,13 @@ class MissionService:
         if filters.get('tipo_mision'):
             query = query.filter(Mision.tipo_mision == filters['tipo_mision'])
         if filters.get('fecha_desde'):
-            query = query.filter(Mision.fecha_salida >= filters['fecha_desde'])
+            # Convertir date a datetime para comparación correcta
+            fecha_desde_dt = datetime.combine(filters['fecha_desde'], datetime.min.time())
+            query = query.filter(Mision.fecha_salida >= fecha_desde_dt)
         if filters.get('fecha_hasta'):
-            query = query.filter(Mision.fecha_retorno <= filters['fecha_hasta'])
+            # Convertir date a datetime para comparación correcta
+            fecha_hasta_dt = datetime.combine(filters['fecha_hasta'], datetime.max.time())
+            query = query.filter(Mision.fecha_salida <= fecha_hasta_dt)  # ✅ CORREGIDO: usar fecha_salida en lugar de fecha_retorno
 
         skip = filters.get('skip', 0)
         limit = filters.get('limit', 100)
@@ -256,7 +260,8 @@ class MissionService:
                                extra_data: Optional[Dict] = None):
         historial = HistorialFlujo(
             id_mision=mision_id, id_usuario_accion=user_id, id_estado_anterior=old_state_id,
-            id_estado_nuevo=new_state_id, tipo_accion=action_type, comentarios=comments, datos_adicionales=extra_data
+            id_estado_nuevo=new_state_id, tipo_accion=action_type, comentarios=comments, 
+            observacion=comments, datos_adicionales=extra_data
         )
         self.db.add(historial)
 
