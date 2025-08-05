@@ -1,5 +1,5 @@
 from typing import List, Dict, Any, Union
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db_financiero
@@ -82,6 +82,37 @@ async def delete_user(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(e)
         )
+
+# === ENDPOINTS DE FIRMAS ===
+
+@router.post("/{user_id}/signature")
+async def upload_signature(
+    user_id: int,
+    signature_file: UploadFile = File(...),
+    db: Session = Depends(get_db_financiero),
+    current_user: UsuarioModel = Depends(get_current_user)
+):
+    """Upload signature image for a user"""
+    user_service = UserService(db)
+    signature_path = user_service.upload_signature(user_id, signature_file)
+    return {
+        "message": "Signature uploaded successfully",
+        "signature_path": signature_path
+    }
+
+@router.delete("/{user_id}/signature")
+async def delete_signature(
+    user_id: int,
+    db: Session = Depends(get_db_financiero),
+    current_user: UsuarioModel = Depends(get_current_user)
+):
+    """Delete user's signature"""
+    user_service = UserService(db)
+    success = user_service.delete_signature(user_id)
+    if success:
+        return {"message": "Signature deleted successfully"}
+    else:
+        return {"message": "No signature found to delete"}
 
 # === ENDPOINTS DE ROLES ===
 

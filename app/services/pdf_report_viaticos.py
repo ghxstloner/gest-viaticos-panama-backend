@@ -1,5 +1,5 @@
 import io
-from typing import Optional
+from typing import Optional, Union, List, Dict
 from datetime import datetime
 from decimal import Decimal
 from reportlab.lib.pagesizes import letter
@@ -30,7 +30,85 @@ class PDFReportViaticosService:
                                                fontSize=5, fontName='Helvetica-Bold', alignment=TA_CENTER)
         self.table_data_style = ParagraphStyle('TableData', parent=self.styles['Normal'], 
                                              fontSize=7, fontName='Helvetica-Bold', alignment=TA_CENTER, wordWrap='CJK')
+        
+        # IDs de usuarios para firmas
+        self.signature_user_ids = {
+            'tesoreria': 2,
+            'presupuesto': 4,
+            'contabilidad': 5,
+            'finanzas': 6
+        }
+        
+        # Definir el orden de los estados en el flujo
+        self.estados_orden = [
+            'BORRADOR',
+            'PENDIENTE_JEFE',
+            'PENDIENTE_REVISION_TESORERIA',
+            'PENDIENTE_ASIGNACION_PRESUPUESTO',
+            'PENDIENTE_CONTABILIDAD',
+            'PENDIENTE_APROBACION_FINANZAS',
+            'PENDIENTE_REFRENDO_CGR',
+            'APROBADO_PARA_PAGO',
+            'PAGADO'
+        ]
     
+    def _get_required_signatures_for_state(self, estado_actual: str) -> Dict[str, bool]:
+        """
+        Determina qué firmas deben mostrarse según el estado actual de la misión.
+        Retorna un diccionario con las firmas requeridas (solo las 4 existentes).
+        """
+        required_signatures = {
+            'tesoreria': False,
+            'presupuesto': False,
+            'contabilidad': False,
+            'finanzas': False
+        }
+        
+        # Estados que indican que la misión ha pasado por cada departamento
+        estados_tesoreria = [ 'PENDIENTE_ASIGNACION_PRESUPUESTO', 
+                           'PENDIENTE_CONTABILIDAD', 'PENDIENTE_APROBACION_FINANZAS', 
+                           'PENDIENTE_REFRENDO_CGR', 'APROBADO_PARA_PAGO', 'PAGADO'
+                           ]
+        
+        estados_presupuesto = ['PENDIENTE_CONTABILIDAD', 
+                             'PENDIENTE_APROBACION_FINANZAS', 'PENDIENTE_REFRENDO_CGR', 
+                             'APROBADO_PARA_PAGO', 'PAGADO']
+        
+        estados_contabilidad = ['PENDIENTE_APROBACION_FINANZAS', 
+                              'PENDIENTE_REFRENDO_CGR', 'APROBADO_PARA_PAGO', 'PAGADO']
+        
+        estados_finanzas = ['PENDIENTE_REFRENDO_CGR', 
+                          'APROBADO_PARA_PAGO', 'PAGADO']
+        
+        # Determinar qué firmas mostrar basándose en el estado actual
+        if estado_actual in estados_tesoreria:
+            required_signatures['tesoreria'] = True
+            
+        if estado_actual in estados_presupuesto:
+            required_signatures['presupuesto'] = True
+            
+        if estado_actual in estados_contabilidad:
+            required_signatures['contabilidad'] = True
+            
+        if estado_actual in estados_finanzas:
+            required_signatures['finanzas'] = True
+            
+        return required_signatures
+
+    def _get_user_signature(self, user_id: int) -> Optional[str]:
+        """Obtener firma de un usuario específico"""
+        try:
+            from sqlalchemy import text
+            result = self.db.execute(text("""
+                SELECT firma FROM usuarios 
+                WHERE id_usuario = :user_id AND firma IS NOT NULL
+            """), {"user_id": user_id})
+            row = result.fetchone()
+            return row.firma if row else None
+        except Exception as e:
+            print(f"Error obteniendo firma del usuario {user_id}: {e}")
+            return None
+
     def _get_beneficiary_name(self, personal_id: int) -> str:
         """Obtener nombre del beneficiario"""
         try:
@@ -154,7 +232,7 @@ class PDFReportViaticosService:
     def generate_viaticos_transporte_pdf(
         self,
         mission: Mision,
-        user: Usuario,
+        user: Union[Usuario, dict],
         numero_solicitud: Optional[str] = None
     ) -> io.BytesIO:
         """Generar PDF de solicitud de viáticos y transporte con formato oficial de Tocumen"""
@@ -921,14 +999,24 @@ class PDFReportViaticosService:
         ]))
 
                 
+        # Obtener información de la vicepresidencia y vicepresidente
+        beneficiary_vicepresidency = self._get_beneficiary_vicepresidency(mission.beneficiario_personal_id)
+        vicepresidency_chief_name = self._get_vicepresidency_chief_name(mission.beneficiario_personal_id)
+        
         firma_data = [
             [Paragraph("Nombre y Firma del Responsable de la Unidad Administrativa Solicitante:", 
                       ParagraphStyle('Left', parent=self.styles['Normal'], alignment=TA_LEFT, fontSize=9))],
-            [Paragraph("", self.table_data_style)],
+            [Paragraph(f"{beneficiary_vicepresidency} - {vicepresidency_chief_name}", 
+                      ParagraphStyle('Left', parent=self.styles['Normal'], alignment=TA_LEFT, fontSize=9))],
+            [Paragraph("", self.table_data_style)],   # Espacio vacío
+            [Paragraph("Nombre y Firma del Responsable que Autoriza el Trámite de la Solicitud y Pago de Viático y Transporte:", 
+                      ParagraphStyle('Left', parent=self.styles['Normal'], alignment=TA_LEFT, fontSize=9))],
+            [Paragraph(f"{beneficiary_vicepresidency} - {vicepresidency_chief_name}", 
+                      ParagraphStyle('Left', parent=self.styles['Normal'], alignment=TA_LEFT, fontSize=9))],
             [Paragraph("", self.table_data_style)]   # Solo una fila vacía para firma
         ]
 
-        firma_row_heights = [10*mm, 6*mm, 20*mm] 
+        firma_row_heights = [10*mm, 6*mm, 15*mm, 10*mm, 6*mm, 15*mm]  # Ajustado para 6 filas 
 
         # Crear tabla de firma con estructura de caja
         firma_table = Table(firma_data, colWidths=[95*mm], rowHeights=firma_row_heights)
@@ -962,7 +1050,6 @@ class PDFReportViaticosService:
         story.append(side_by_side_container)
         story.append(Spacer(1, 10*mm))
         
-        # FIRMAS FINALES
         firmas_data = [
                         [
                 Paragraph("Nombre y Firma de quien Prepara el Formulario", 
@@ -971,8 +1058,8 @@ class PDFReportViaticosService:
                         ParagraphStyle('Left', parent=self.styles['Normal'], alignment=TA_LEFT, fontSize=9))
             ],
             [
-                Paragraph("", self.table_data_style),  # Espacio para firma
-                Paragraph("", self.table_data_style)   # Espacio para firma
+                Paragraph("", self.table_data_style),  # Espacio para firma del preparador
+                Paragraph("", self.table_data_style)   # Firma del beneficiario
             ]
         ]
 
@@ -990,6 +1077,22 @@ class PDFReportViaticosService:
         story.append(Spacer(1, 5*mm))
         
         # DEPARTAMENTOS DE AUTORIZACIÓN
+        # Obtener firmas requeridas según el estado actual
+        required_signatures = self._get_required_signatures_for_state(mission.estado_flujo.nombre_estado)
+        
+        # Obtener firmas de usuarios
+        tesoreria_signature = self._get_user_signature(self.signature_user_ids['tesoreria']) if required_signatures['tesoreria'] else None
+        presupuesto_signature = self._get_user_signature(self.signature_user_ids['presupuesto']) if required_signatures['presupuesto'] else None
+        contabilidad_signature = self._get_user_signature(self.signature_user_ids['contabilidad']) if required_signatures['contabilidad'] else None
+        finanzas_signature = self._get_user_signature(self.signature_user_ids['finanzas']) if required_signatures['finanzas'] else None
+        
+        # Crear elementos de firma para cada departamento
+        tesoreria_element = Image(tesoreria_signature, width=40*mm, height=15*mm) if tesoreria_signature else Paragraph("", self.table_data_style)
+        presupuesto_element = Image(presupuesto_signature, width=40*mm, height=15*mm) if presupuesto_signature else Paragraph("", self.table_data_style)
+        contabilidad_element = Image(contabilidad_signature, width=40*mm, height=15*mm) if contabilidad_signature else Paragraph("", self.table_data_style)
+        finanzas_element = Image(finanzas_signature, width=40*mm, height=15*mm) if finanzas_signature else Paragraph("", self.table_data_style)
+        
+        # DEPARTAMENTOS DE AUTORIZACIÓN
         dept_data = [
             [
                 Paragraph("Nombre y Firma del Director de Administración y/o Finanzas:", 
@@ -1002,8 +1105,8 @@ class PDFReportViaticosService:
                 Paragraph("", self.table_data_style)
             ],
             [
-                Paragraph("", self.table_data_style),  # Espacio para firma
-                Paragraph("", self.table_data_style)   # Espacio para firma
+                finanzas_element if required_signatures['finanzas'] else Paragraph("", self.table_data_style),
+                Paragraph("", self.table_data_style)   # Espacio para firma de máxima autoridad
             ]
         ]
 
@@ -1016,6 +1119,7 @@ class PDFReportViaticosService:
             ('FONTSIZE', (0, 0), (-1, -1), 9),
             ('VALIGN', (0, 0), (-1, 1), 'TOP'),    # Headers y nombres arriba
             ('VALIGN', (0, 2), (-1, 2), 'MIDDLE'), # Espacio firma centrado
+            ('ALIGN', (0, 2), (-1, 2), 'CENTER'),  # Firmas centradas horizontalmente
         ]))
         story.append(dept_table)
         story.append(Spacer(1, 5*mm))
@@ -1031,9 +1135,9 @@ class PDFReportViaticosService:
                          ParagraphStyle('Left', parent=self.styles['Normal'], alignment=TA_LEFT, fontSize=9))
             ],
             [
-                Paragraph("", self.table_data_style),  # Espacio para sello y firma
-                Paragraph("", self.table_data_style),  # Espacio para sello y firma
-                Paragraph("", self.table_data_style)   # Espacio para sello y firma
+                tesoreria_element if required_signatures['tesoreria'] else Paragraph("", self.table_data_style),
+                contabilidad_element if required_signatures['contabilidad'] else Paragraph("", self.table_data_style),
+                presupuesto_element if required_signatures['presupuesto'] else Paragraph("", self.table_data_style)
             ]
         ]
 
@@ -1047,18 +1151,31 @@ class PDFReportViaticosService:
             ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
             ('VALIGN', (0, 0), (-1, 0), 'TOP'),    # Headers arriba
             ('VALIGN', (0, 1), (-1, 1), 'MIDDLE'), # Espacio sello/firma centrado
+            ('ALIGN', (0, 1), (-1, 1), 'CENTER'),  # Firmas centradas horizontalmente
         ]))
         story.append(final_depts_table)
         story.append(Spacer(1, 5*mm))
         
-        # OFICINA DE FISCALIZACIÓN
+        # OFICINA DE FISCALIZACIÓN (CGR) - Siempre mostrar la tabla, pero solo la firma cuando corresponda
+        estados_cgr = ['PENDIENTE_REFRENDO_CGR', 'APROBADO_PARA_PAGO', 'PAGADO', 'DEVUELTO_CORRECCION']
+        
+        # Obtener firma de CGR si corresponde
+        cgr_signature = None
+        if mission.estado_flujo.nombre_estado in estados_cgr:
+            # Aquí podrías obtener la firma de CGR si tienes un usuario específico
+            # cgr_signature = self._get_user_signature(self.signature_user_ids.get('cgr'))
+            pass
+        
+        # Crear elemento de firma para CGR
+        cgr_element = Image(cgr_signature, width=40*mm, height=15*mm) if cgr_signature else Paragraph("", self.table_data_style)
+        
         fiscalizacion_data = [
             [
                 Paragraph("OFICINA DE FISCALIZACIÓN GENERAL DE LA CGR<br/>SELLO, FECHA Y REFRENDO", 
                          ParagraphStyle('Center', parent=self.styles['Normal'], alignment=TA_CENTER, fontSize=8, fontName='Helvetica-Bold'))
             ],
             [
-                Paragraph("", self.table_data_style)  # Espacio para sello y refrendo
+                cgr_element  # Firma de CGR (vacía si no corresponde)
             ]
         ]
 
@@ -1070,6 +1187,7 @@ class PDFReportViaticosService:
             ('GRID', (0, 0), (-1, -1), 1, colors.black),
             ('VALIGN', (0, 0), (0, 0), 'TOP'),    # Header arriba
             ('VALIGN', (0, 1), (0, 1), 'MIDDLE'), # Espacio sello/refrendo centrado
+            ('ALIGN', (0, 1), (0, 1), 'CENTER'),  # Firma centrada horizontalmente
             ('FONTSIZE', (0, 1), (-1, -1), 9),
         ]))
         story.append(fiscalizacion_table)

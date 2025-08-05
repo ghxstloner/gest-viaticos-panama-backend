@@ -521,6 +521,41 @@ async def create_travel_expenses(
         
         db_financiero.commit()
         
+        # Enviar email de confirmación
+        try:
+            from app.services.email_service import EmailService
+            email_service = EmailService(db_financiero)
+            
+            # Obtener email del solicitante
+            solicitante_email = email_service.get_solicitante_email(mision.id_mision, db_rrhh)
+            
+            if solicitante_email:
+                # Crear datos para el email
+                email_data = {
+                    'numero_solicitud': numero_solicitud,
+                    'tipo': 'Viáticos',
+                    'fecha': datetime.now().strftime('%d/%m/%Y'),
+                    'destino': request.destino,
+                    'monto': f"${float(monto_total):,.2f}",
+                    'estado': 'PENDIENTE_JEFE'
+                }
+                
+                # Crear HTML del email
+                html_body = email_service.create_new_request_email_html(email_data)
+                
+                # Enviar email en background
+                import asyncio
+                asyncio.create_task(email_service.send_email(
+                    to_emails=[solicitante_email],
+                    subject=f"Nueva Solicitud Creada - {numero_solicitud}",
+                    body="Su solicitud ha sido creada exitosamente",
+                    html_body=html_body
+                ))
+                
+        except Exception as e:
+            # Log del error pero no fallar la operación principal
+            print(f"Error enviando email de confirmación: {str(e)}")
+        
         return {
             "success": True,
             "message": "Solicitud de viáticos creada exitosamente",
@@ -655,6 +690,41 @@ async def create_petty_cash(
         })
         
         db_financiero.commit()
+        
+        # Enviar email de confirmación
+        try:
+            from app.services.email_service import EmailService
+            email_service = EmailService(db_financiero)
+            
+            # Obtener email del solicitante
+            solicitante_email = email_service.get_solicitante_email(mision.id_mision, db_rrhh)
+            
+            if solicitante_email:
+                # Crear datos para el email
+                email_data = {
+                    'numero_solicitud': numero_solicitud,
+                    'tipo': 'Caja Menuda',
+                    'fecha': datetime.now().strftime('%d/%m/%Y'),
+                    'destino': destino_descripcion,
+                    'monto': f"${float(monto_total):,.2f}",
+                    'estado': 'PENDIENTE_JEFE'
+                }
+                
+                # Crear HTML del email
+                html_body = email_service.create_new_request_email_html(email_data)
+                
+                # Enviar email en background
+                import asyncio
+                asyncio.create_task(email_service.send_email(
+                    to_emails=[solicitante_email],
+                    subject=f"Nueva Solicitud Creada - {numero_solicitud}",
+                    body="Su solicitud ha sido creada exitosamente",
+                    html_body=html_body
+                ))
+                
+        except Exception as e:
+            # Log del error pero no fallar la operación principal
+            print(f"Error enviando email de confirmación: {str(e)}")
         
         return {
             "success": True,

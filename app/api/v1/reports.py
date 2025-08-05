@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, Query, Response, HTTPException, status
-from sqlalchemy.orm import Session
-from typing import Optional
+from sqlalchemy.orm import Session, joinedload
+from typing import Optional, Dict, Any
 from datetime import date, datetime
 import io
 
@@ -11,7 +11,7 @@ from ...services.pdf_report_viaticos import PDFReportViaticosService
 from ...api.deps import get_current_user, get_current_user_universal
 from ...models.user import Usuario
 from ...models.enums import TipoMision, TipoTransporte
-from ...models.mission import Mision, MisionCajaMenuda
+from ...models.mission import Mision, EstadoFlujo, MisionCajaMenuda
 
 router = APIRouter()
 
@@ -285,8 +285,8 @@ async def get_mission_detail_report(
         "historial_flujo": [
             {
                 "fecha": item.fecha_accion,
-                "usuario": item.usuario_accion.nombre_usuario,
-                "accion": item.tipo_accion.value,
+                "usuario": item.usuario_accion.login_username,
+                "accion": str(item.tipo_accion) if hasattr(item.tipo_accion, 'value') else item.tipo_accion,
                 "estado_anterior": item.estado_anterior.nombre_estado if item.estado_anterior else None,
                 "estado_nuevo": item.estado_nuevo.nombre_estado,
                 "comentarios": item.comentarios
@@ -355,12 +355,12 @@ async def generate_caja_menuda_pdf(
                     detail="No tiene permisos para ver esta caja menuda"
                 )
     
-    # Verificar que la misión esté en estado "pagado"
-    if mission.estado_flujo.nombre_estado != "PAGADO":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Solo se puede generar el reporte PDF de caja menuda para misiones con estado 'pagado'"
-        )
+    # Comentado: Validación de estado removida para permitir exportación en cualquier momento
+    # if mission.estado_flujo.nombre_estado != "PAGADO":
+    #     raise HTTPException(
+    #         status_code=status.HTTP_403_FORBIDDEN,
+    #         detail="Solo se puede generar el reporte PDF de caja menuda para misiones con estado 'pagado'"
+    #     )
     
     # Generar PDF
     pdf_service = PDFReportService(db)
@@ -422,12 +422,12 @@ async def generate_viaticos_pdf(
             detail="No se encontraron viáticos para esta misión"
         )
     
-    # Verificar que la misión esté en estado "pagado"
-    if mission.estado_flujo.nombre_estado != "PAGADO":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Solo se puede generar el reporte PDF de viáticos para misiones con estado 'pagado'"
-        )
+    # Comentado: Validación de estado removida para permitir exportación en cualquier momento
+    # if mission.estado_flujo.nombre_estado != "PAGADO":
+    #     raise HTTPException(
+    #         status_code=status.HTTP_403_FORBIDDEN,
+    #         detail="Solo se puede generar el reporte PDF de viáticos para misiones con estado 'pagado'"
+    #     )
     
     # Generar PDF
     pdf_service = PDFReportService(db)
@@ -489,12 +489,12 @@ async def generate_transporte_pdf(
             detail="No se encontró transporte para esta misión"
         )
     
-    # Verificar que la misión esté en estado "pagado"
-    if mission.estado_flujo.nombre_estado != "PAGADO":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Solo se puede generar el reporte PDF de transporte para misiones con estado 'pagado'"
-        )
+    # Comentado: Validación de estado removida para permitir exportación en cualquier momento
+    # if mission.estado_flujo.nombre_estado != "PAGADO":
+    #     raise HTTPException(
+    #         status_code=status.HTTP_403_FORBIDDEN,
+    #         detail="Solo se puede generar el reporte PDF de transporte para misiones con estado 'pagado'"
+    #     )
     
     # Generar PDF
     pdf_service = PDFReportService(db)
@@ -519,8 +519,8 @@ async def generate_viaticos_transporte_pdf(
     current_user = Depends(get_current_user_universal)
 ):
     """Generar reporte PDF de viáticos y transporte con formato oficial de Tocumen"""
-    # Obtener la misión
-    mission = db.query(Mision).filter(Mision.id_mision == mission_id).first()
+    # Obtener la misión con estado_flujo cargado
+    mission = db.query(Mision).options(joinedload(Mision.estado_flujo)).filter(Mision.id_mision == mission_id).first()
     if not mission:
         raise HTTPException(status_code=404, detail="Misión no encontrada")
     
@@ -559,12 +559,12 @@ async def generate_viaticos_transporte_pdf(
             detail="No se encontraron viáticos o transporte para esta misión"
         )
     
-    # Verificar que la misión esté en estado "pagado"
-    if mission.estado_flujo.nombre_estado != "PAGADO":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Solo se puede generar el reporte PDF de viáticos y transporte para misiones con estado 'pagado'"
-        )
+    # Comentado: Validación de estado removida para permitir exportación en cualquier momento
+    # if mission.estado_flujo.nombre_estado != "PAGADO":
+    #     raise HTTPException(
+    #         status_code=status.HTTP_403_FORBIDDEN,
+    #         detail="Solo se puede generar el reporte PDF de viáticos y transporte para misiones con estado 'pagado'"
+    #     )
     
     # Generar PDF
     pdf_service = PDFReportViaticosService(db)
@@ -579,3 +579,126 @@ async def generate_viaticos_transporte_pdf(
             "Content-Disposition": f"attachment; filename={filename}"
         }
     )
+
+
+@router.get("/employee/requests/{mission_id}/export/viaticos")
+async def export_employee_viaticos(
+    mission_id: int,
+    numero_solicitud: Optional[str] = Query(None, description="Número de solicitud personalizado"),
+    db: Session = Depends(get_db_financiero),
+    current_user = Depends(get_current_user_universal)
+):
+    """Exportar solicitud de viáticos del empleado en PDF"""
+    
+    # Verificar que sea un empleado
+    if not isinstance(current_user, dict):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Este endpoint es solo para empleados"
+        )
+    
+    # Obtener la misión con estado_flujo cargado
+    mission = db.query(Mision).options(joinedload(Mision.estado_flujo)).filter(Mision.id_mision == mission_id).first()
+    if not mission:
+        raise HTTPException(status_code=404, detail="Misión no encontrada")
+    
+    # Verificar que el empleado sea el beneficiario
+    if mission.beneficiario_personal_id != current_user.get('personal_id'):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo puedes exportar tus propias solicitudes"
+        )
+    
+    # Verificar que sea una misión de viáticos
+    if mission.tipo_mision != TipoMision.VIATICOS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Esta misión no es de viáticos"
+        )
+    
+    try:
+        # Generar PDF de viáticos usando el servicio específico
+        pdf_service = PDFReportViaticosService(db)
+        pdf_buffer = pdf_service.generate_viaticos_transporte_pdf(mission, current_user, numero_solicitud)
+        
+        # Configurar headers para descarga
+        filename = f"viaticos_{mission_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        
+        return Response(
+            content=pdf_buffer.getvalue(),
+            media_type="application/pdf",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error generando el PDF: {str(e)}"
+        )
+
+
+@router.get("/employee/requests/{mission_id}/export/caja-menuda")
+async def export_employee_caja_menuda(
+    mission_id: int,
+    numero_solicitud: Optional[str] = Query(None, description="Número de solicitud personalizado"),
+    db: Session = Depends(get_db_financiero),
+    current_user = Depends(get_current_user_universal)
+):
+    """Exportar solicitud de caja menuda del empleado en PDF"""
+    
+    # Verificar que sea un empleado
+    if not isinstance(current_user, dict):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Este endpoint es solo para empleados"
+        )
+    
+    # Obtener la misión
+    mission = db.query(Mision).filter(Mision.id_mision == mission_id).first()
+    if not mission:
+        raise HTTPException(status_code=404, detail="Misión no encontrada")
+    
+    # Verificar que el empleado sea el beneficiario
+    if mission.beneficiario_personal_id != current_user.get('personal_id'):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo puedes exportar tus propias solicitudes"
+        )
+    
+    # Verificar que sea una misión de caja menuda
+    if mission.tipo_mision != TipoMision.CAJA_MENUDA:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Esta misión no es de caja menuda"
+        )
+    
+    try:
+        # Obtener los items de caja menuda
+        caja_menuda_items = db.query(MisionCajaMenuda).filter(
+            MisionCajaMenuda.id_mision == mission.id_mision
+        ).all()
+        
+        if not caja_menuda_items:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No se encontraron datos de caja menuda para esta misión"
+            )
+        
+        # Generar PDF de caja menuda
+        pdf_service = PDFReportService(db)
+        pdf_buffer = pdf_service.generate_caja_menuda_pdf(caja_menuda_items, mission, current_user)
+        
+        # Configurar headers para descarga
+        filename = f"caja_menuda_{mission_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        
+        return Response(
+            content=pdf_buffer.getvalue(),
+            media_type="application/pdf",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error generando el PDF: {str(e)}"
+        )

@@ -73,6 +73,7 @@ class Usuario(Base, TimestampMixin):
     id_rol: Mapped[int] = mapped_column(Integer, ForeignKey("roles.id_rol"), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     ultimo_acceso: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    firma: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
     rol: Mapped["Rol"] = relationship("Rol", back_populates="usuarios")
     
@@ -142,6 +143,7 @@ class Usuario(Base, TimestampMixin):
             'is_active': self.is_active,
             'id_rol': self.id_rol,
             'personal_id_rrhh': self.personal_id_rrhh,
+            'firma': self.firma,
             'rol': self.rol.to_dict() if self.rol else None,
             'permisos': self.get_permissions()
         }

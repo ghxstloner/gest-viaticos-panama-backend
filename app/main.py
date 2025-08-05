@@ -3,6 +3,7 @@
 from fastapi import FastAPI, Request, status, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from app.api.v1 import api_router
 from app.core.config import settings
 from app.models.base import Base
@@ -18,6 +19,7 @@ from app.models.mission import *
 from app.models.configuration import ConfiguracionGeneral, ConfiguracionSistema  # ← NUEVO
 from app.api.deps import get_current_user_universal
 from typing import Union, Optional
+import os
 
 Base.metadata.create_all(bind=engine_financiero)
 
@@ -118,6 +120,10 @@ app.add_middleware(
 
 # Incluir todas las rutas de la API definidas en /api/v1/__init__.py
 app.include_router(api_router, prefix=settings.API_V1_STR)
+
+# Mount static files for uploads
+if os.path.exists("uploads"):
+    app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 @app.get("/", tags=["Root"])
 async def root():

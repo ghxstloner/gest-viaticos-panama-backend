@@ -7,6 +7,10 @@ from ..models.user import Usuario, Rol, Permiso, RolPermiso
 from ..schemas.user import UsuarioCreate, UsuarioUpdate, RolCreate, RolUpdate
 from ..core.security import get_password_hash
 from fastapi import HTTPException, status
+import os
+import uuid
+from datetime import datetime
+from fastapi import UploadFile
 
 
 class UserService:
@@ -58,7 +62,8 @@ class UserService:
             login_username=user_data.login_username,
             password_hash=get_password_hash(user_data.password),
             id_rol=user_data.id_rol,
-            is_active=user_data.is_active
+            is_active=user_data.is_active,
+            firma=user_data.firma
         )
 
         self.db.add(db_user)
@@ -148,6 +153,92 @@ class UserService:
         self.db.refresh(user)
         return user
 
+    def upload_signature(self, user_id: int, signature_file: UploadFile) -> str:
+        """Upload signature image for a user"""
+        user = self.get_user(user_id)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+
+        # Validate file type
+        allowed_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp'}
+        file_extension = os.path.splitext(signature_file.filename)[1].lower()
+        
+        if file_extension not in allowed_extensions:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid file type. Only image files are allowed."
+            )
+
+        # Validate file size (max 5MB)
+        if signature_file.size and signature_file.size > 5 * 1024 * 1024:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="File too large. Maximum size is 5MB."
+            )
+
+        # Generate unique filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        unique_id = str(uuid.uuid4())[:8]
+        filename = f"firma_{user_id}_{timestamp}_{unique_id}{file_extension}"
+        
+        # Create uploads/firmas directory if it doesn't exist
+        upload_dir = "uploads/firmas"
+        os.makedirs(upload_dir, exist_ok=True)
+        
+        # Save file
+        file_path = os.path.join(upload_dir, filename)
+        
+        try:
+            # Read file content
+            content = signature_file.file.read()
+            
+            # Write to disk
+            with open(file_path, "wb") as f:
+                f.write(content)
+            
+            # Update user's signature path
+            user.firma = f"uploads/firmas/{filename}"
+            self.db.commit()
+            
+            return user.firma
+            
+        except Exception as e:
+            # Clean up file if it was created
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error uploading signature: {str(e)}"
+            )
+
+    def delete_signature(self, user_id: int) -> bool:
+        """Delete user's signature"""
+        user = self.get_user(user_id)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+
+        if user.firma:
+            # Delete file from disk
+            file_path = user.firma
+            if os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except Exception as e:
+                    print(f"Error deleting signature file: {e}")
+            
+            # Update database
+            user.firma = None
+            self.db.commit()
+            return True
+        
+        return False
+
     def delete_user(self, user_id: int) -> bool:
         """Delete user (soft delete by deactivating)"""
         user = self.get_user(user_id)
@@ -156,6 +247,13 @@ class UserService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="User not found"
             )
+
+        # Delete signature file if exists
+        if user.firma and os.path.exists(user.firma):
+            try:
+                os.remove(user.firma)
+            except Exception as e:
+                print(f"Error deleting signature file: {e}")
 
         user.is_active = False
         self.db.commit()

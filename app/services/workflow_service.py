@@ -829,9 +829,10 @@ class WorkflowService:
             self.db.add(partida)
             total_asignado += partida_data.monto
         
-        # Actualizar el monto total calculado: restar las partidas antiguas y sumar las nuevas
-        mision.monto_total_calculado = mision.monto_total_calculado - monto_partidas_existentes + total_asignado
-
+        # IMPORTANTE: NO modificar el monto_total_calculado
+        # Las partidas presupuestarias solo distribuyen el monto existente
+        # El monto_total_calculado debe permanecer igual
+        
         # Crear historial de flujo
         self._create_history_record(mision, transicion, request_data, user, None)
         
@@ -842,12 +843,11 @@ class WorkflowService:
             user_name = user.login_username if hasattr(user, 'login_username') else "Analista Presupuesto"
         
         return {
-            'message': f'Partidas presupuestarias asignadas. Total actualizado: B/. {mision.monto_total_calculado} en {len(request_data.partidas)} partidas',
+            'message': f'Partidas presupuestarias asignadas. Total distribuido: B/. {total_asignado} en {len(request_data.partidas)} partidas',
             'datos_adicionales': {
                 'total_asignado': float(total_asignado),
                 'monto_partidas_eliminadas': float(monto_partidas_existentes),
-                'monto_total_anterior': float(monto_total_original),
-                'monto_total_actualizado': float(mision.monto_total_calculado),
+                'monto_total_mision': float(mision.monto_total_calculado),
                 'cantidad_partidas': len(request_data.partidas),
                 'analista_presupuesto': user_name
             }

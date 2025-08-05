@@ -50,6 +50,7 @@ class UsuarioBase(BaseModel):
     login_username: str
     id_rol: int
     is_active: bool = True
+    firma: Optional[str] = None
 
 class UsuarioCreate(UsuarioBase):
     password: str
@@ -60,6 +61,7 @@ class UsuarioUpdate(BaseModel):
     password: Optional[str] = None
     id_rol: Optional[int] = None
     is_active: Optional[bool] = None
+    firma: Optional[str] = None
 
 class Usuario(UsuarioBase):
     model_config = ConfigDict(from_attributes=True)
