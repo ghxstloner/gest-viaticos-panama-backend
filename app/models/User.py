@@ -62,6 +62,14 @@ class Rol(Base, TimestampMixin):
             ]
         }
 
+class FirmaJefe(Base):
+    __tablename__ = "firmas_jefes"
+    __table_args__ = {'extend_existing': True}
+    
+    firmas_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    personal_id: Mapped[int] = mapped_column(Integer, nullable=False, unique=True)
+    firma: Mapped[Optional[str]] = mapped_column(String(250), nullable=True)
+
 class Usuario(Base, TimestampMixin):
     __tablename__ = "usuarios"
     __table_args__ = {'extend_existing': True}

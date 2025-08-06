@@ -82,10 +82,19 @@ class Mision(Base, TimestampMixin):
     fecha_firma_beneficiario: Mapped[Optional[DateTime]] = mapped_column(DateTime, nullable=True)
     observaciones_especiales: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     fecha_limite_presentacion: Mapped[Optional[Date]] = mapped_column(Date, nullable=True)
+    
+    # Campos para tracking de usuarios que aprueban en cada etapa del workflow
+    id_tesoreria: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    id_presupuesto: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    id_contabilidad: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    id_finanzas: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    id_jefe: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     # --- Relationships ---
     estado_flujo: Mapped["EstadoFlujo"] = relationship("EstadoFlujo", back_populates="misiones")
     usuario_prepara: Mapped[Optional["Usuario"]] = relationship("Usuario", foreign_keys=[id_usuario_prepara])
+    
+
     
     items_viaticos: Mapped[List["ItemViatico"]] = relationship("ItemViatico", back_populates="mision", cascade="all, delete-orphan")
     items_viaticos_completos: Mapped[List["ItemViaticoCompleto"]] = relationship("ItemViaticoCompleto", back_populates="mision", cascade="all, delete-orphan")

@@ -281,7 +281,6 @@ def get_tarifas_dinamicas(db_financiero: Session) -> dict:
         }
 
 def convert_si_no_to_amount(valor: str, categoria: str, concepto: str, db_financiero: Session = None) -> Decimal:
-    print(f"DEBUG convert_si_no_to_amount: valor={valor}, categoria={categoria}, concepto={concepto}")
     if valor.upper() != 'SI':
         return Decimal("0.00")
     
@@ -300,7 +299,6 @@ def convert_si_no_to_amount(valor: str, categoria: str, concepto: str, db_financ
             categoria_sistema = categoria_mapping.get(categoria, categoria)
             tarifa = tarifas.get(categoria_sistema, {}).get(concepto.upper(), 0.00)
             
-            print(f"DEBUG: categoria_frontend={categoria}, categoria_sistema={categoria_sistema}, concepto={concepto}, tarifa={tarifa}")
             
             return Decimal(str(tarifa))
         except Exception as e:
@@ -393,9 +391,8 @@ async def create_travel_expenses(
         db_financiero.flush()  # Para obtener el ID
         
         # Insertar viáticos completos
-        print(f"DEBUG: Procesando {len(request.viaticosCompletos)} viáticos completos")
+
         for vc in request.viaticosCompletos:
-            print(f"DEBUG: Viático completo: {vc.cantidadDias} días a B/. {vc.pagoPorDia} por día = B/. {vc.cantidadDias * vc.pagoPorDia}")
             db_financiero.execute(text("""
                 INSERT INTO items_viaticos_completos 
                 (id_mision, cantidad_dias, monto_por_dia) 
@@ -408,9 +405,7 @@ async def create_travel_expenses(
         
         # Insertar viáticos parciales
         categoria_str = str(request.categoria).replace('_', ' ') if request.categoria else 'TITULAR'
-        print(f"DEBUG: Procesando viáticos parciales para categoría: {categoria_str}")
         for vp in request.viaticosParciales:
-            print(f"DEBUG: Procesando viático parcial para fecha {vp.fecha}: desayuno={vp.desayuno}, almuerzo={vp.almuerzo}, cena={vp.cena}, hospedaje={vp.hospedaje}")
             monto_desayuno = convert_si_no_to_amount(vp.desayuno, categoria_str, 'DESAYUNO', db_financiero)
             monto_almuerzo = convert_si_no_to_amount(vp.almuerzo, categoria_str, 'ALMUERZO', db_financiero)
             monto_cena = convert_si_no_to_amount(vp.cena, categoria_str, 'CENA', db_financiero)
@@ -433,9 +428,7 @@ async def create_travel_expenses(
             })
         
         # Insertar detalle de transporte
-        print(f"DEBUG: Procesando {len(request.transporteDetalle)} items de transporte")
         for td in request.transporteDetalle:
-            print(f"DEBUG: Transporte: {td.tipo} de {td.origen} a {td.destino} = B/. {td.monto}")
             db_financiero.execute(text("""
                 INSERT INTO items_transporte 
                 (id_mision, fecha, tipo, origen, destino, monto) 
@@ -1783,4 +1776,329 @@ async def get_mission_details_public(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error obteniendo detalles: {str(e)}"
+        )
+
+@router.post("/validate-viaticos-rango", summary="Validar viáticos en rango de fechas")
+async def validate_viaticos_rango(
+    request: ViaticoValidationRequest,
+    db_financiero: Session = Depends(get_db_financiero),
+    db_rrhh: Session = Depends(get_db_rrhh),
+    current_employee: dict = Depends(get_current_employee)
+):
+    """
+    Verificar si el usuario ya tiene viáticos registrados en el rango de fechas solicitado.
+    
+    **Características:**
+    - Permite viáticos en el mismo día si las horas son diferentes
+    - Excluye misiones rechazadas o canceladas
+    - Valida conflictos de horas cuando se proporcionan
+    
+    **Parámetros:**
+    - fecha_inicio: Fecha de inicio del rango
+    - fecha_fin: Fecha de fin del rango  
+    - hora_inicio: Hora de inicio (opcional, formato HH:MM)
+    - hora_fin: Hora de fin (opcional, formato HH:MM)
+    
+    **Respuesta:**
+    - tiene_viaticos_en_rango: true si hay conflictos, false si no hay conflictos
+    - mensaje: Descripción del resultado
+    - detalles: Información detallada de viáticos encontrados
+    """
+    try:
+        personal_id = current_employee["personal_id"]
+        
+        # Validar que las fechas sean coherentes
+        if request.fecha_inicio > request.fecha_fin:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="La fecha de inicio no puede ser posterior a la fecha de fin"
+            )
+        
+        # Obtener el usuario_id del empleado
+        usuario_id = get_usuario_for_employee(personal_id, db_financiero)
+        
+        # Construir la consulta optimizada para verificar viáticos en el rango
+        # Primero obtener las misiones que se solapan (sin duplicados)
+        base_query = """
+            SELECT DISTINCT m.id_mision, m.fecha_salida, m.fecha_retorno, 
+                   TIME(m.fecha_salida) as hora_salida, TIME(m.fecha_retorno) as hora_retorno
+            FROM misiones m
+            WHERE m.beneficiario_personal_id = :personal_id
+            AND m.id_estado_flujo NOT IN (4, 5)  -- Excluir estados rechazados o cancelados
+            AND (DATE(m.fecha_salida) <= :fecha_fin AND DATE(m.fecha_retorno) >= :fecha_inicio)
+            ORDER BY m.fecha_salida DESC
+        """
+        
+        params = {
+            "personal_id": personal_id,
+            "fecha_inicio": request.fecha_inicio,
+            "fecha_fin": request.fecha_fin
+        }
+        
+        result = db_financiero.execute(text(base_query), params)
+        viaticos_existentes = result.fetchall()
+        
+        print(f"DEBUG: Rango solicitado: {request.fecha_inicio} a {request.fecha_fin}")
+        print(f"DEBUG: Hora inicio recibida: '{request.hora_inicio}' (tipo: {type(request.hora_inicio)})")
+        print(f"DEBUG: Hora fin recibida: '{request.hora_fin}' (tipo: {type(request.hora_fin)})")
+        print(f"DEBUG: Viáticos encontrados en DB: {len(viaticos_existentes)}")
+        
+        # Inicializar variables
+        detalles = []
+        conflictos_detectados = []
+        
+        # LÓGICA CON VALIDACIÓN DE HORAS: Si se proporcionan horas, validar horas; si no, solo fechas
+        if viaticos_existentes:
+            print(f"DEBUG: Se encontraron {len(viaticos_existentes)} viáticos existentes")
+            
+            # Verificar si se proporcionaron horas válidas
+            horas_proporcionadas = (request.hora_inicio and request.hora_inicio.strip() and 
+                                  request.hora_fin and request.hora_fin.strip())
+            print(f"DEBUG: ¿Se proporcionaron horas? {horas_proporcionadas}")
+            
+            for viatico in viaticos_existentes:
+                print(f"DEBUG: Procesando viático {viatico.id_mision}")
+                print(f"DEBUG: Viático existente: {viatico.fecha_salida} a {viatico.fecha_retorno}")
+                print(f"DEBUG: Solicitud: {request.fecha_inicio} {request.hora_inicio or ''} a {request.fecha_fin} {request.hora_fin or ''}")
+                
+                # Extraer fechas para comparación
+                fecha_salida_existente = viatico.fecha_salida.date() if viatico.fecha_salida else None
+                fecha_retorno_existente = viatico.fecha_retorno.date() if viatico.fecha_retorno else None
+                
+                # Verificar si hay solapamiento de fechas
+                fechas_se_solapan = not (request.fecha_fin < fecha_salida_existente or request.fecha_inicio > fecha_retorno_existente)
+                print(f"DEBUG: ¿Hay solapamiento de fechas? {fechas_se_solapan}")
+                
+                hay_conflicto = False
+                motivo_conflicto = ""
+                
+                if fechas_se_solapan:
+                    if horas_proporcionadas:
+                        # Si hay horas, validar solapamiento de horas
+                        print(f"DEBUG: Validando solapamiento de horas...")
+                        
+                        from datetime import datetime, timedelta
+                        
+                        # Iterar día por día en el rango solicitado
+                        fecha_actual = request.fecha_inicio
+                        while fecha_actual <= request.fecha_fin:
+                            # Verificar si este día está dentro del rango del viático existente
+                            if fecha_salida_existente <= fecha_actual <= fecha_retorno_existente:
+                                print(f"DEBUG: Verificando día {fecha_actual}")
+                                
+                                # Determinar las horas del viático existente para este día
+                                if fecha_actual == fecha_salida_existente and fecha_actual == fecha_retorno_existente:
+                                    # Mismo día de inicio y fin
+                                    viatico_hora_inicio = viatico.fecha_salida.time()
+                                    viatico_hora_fin = viatico.fecha_retorno.time()
+                                elif fecha_actual == fecha_salida_existente:
+                                    # Día de inicio del viático
+                                    viatico_hora_inicio = viatico.fecha_salida.time()
+                                    viatico_hora_fin = datetime.strptime('23:59', '%H:%M').time()
+                                elif fecha_actual == fecha_retorno_existente:
+                                    # Día de fin del viático
+                                    viatico_hora_inicio = datetime.strptime('00:00', '%H:%M').time()
+                                    viatico_hora_fin = viatico.fecha_retorno.time()
+                                else:
+                                    # Día intermedio - todo el día ocupado
+                                    viatico_hora_inicio = datetime.strptime('00:00', '%H:%M').time()
+                                    viatico_hora_fin = datetime.strptime('23:59', '%H:%M').time()
+                                
+                                # Determinar las horas de la solicitud para este día
+                                if fecha_actual == request.fecha_inicio and fecha_actual == request.fecha_fin:
+                                    # Mismo día de inicio y fin de solicitud
+                                    solicitud_hora_inicio = datetime.strptime(request.hora_inicio, '%H:%M').time()
+                                    solicitud_hora_fin = datetime.strptime(request.hora_fin, '%H:%M').time()
+                                elif fecha_actual == request.fecha_inicio:
+                                    # Día de inicio de solicitud
+                                    solicitud_hora_inicio = datetime.strptime(request.hora_inicio, '%H:%M').time()
+                                    solicitud_hora_fin = datetime.strptime('23:59', '%H:%M').time()
+                                elif fecha_actual == request.fecha_fin:
+                                    # Día de fin de solicitud
+                                    solicitud_hora_inicio = datetime.strptime('00:00', '%H:%M').time()
+                                    solicitud_hora_fin = datetime.strptime(request.hora_fin, '%H:%M').time()
+                                else:
+                                    # Día intermedio de solicitud
+                                    solicitud_hora_inicio = datetime.strptime('00:00', '%H:%M').time()
+                                    solicitud_hora_fin = datetime.strptime('23:59', '%H:%M').time()
+                                
+                                print(f"DEBUG: Día {fecha_actual} - Viático: {viatico_hora_inicio} a {viatico_hora_fin}")
+                                print(f"DEBUG: Día {fecha_actual} - Solicitud: {solicitud_hora_inicio} a {solicitud_hora_fin}")
+                                
+                                # Verificar solapamiento de horas en este día
+                                hay_solapamiento_horas = not (solicitud_hora_fin <= viatico_hora_inicio or solicitud_hora_inicio >= viatico_hora_fin)
+                                print(f"DEBUG: ¿Solapamiento de horas en {fecha_actual}? {hay_solapamiento_horas}")
+                                
+                                if hay_solapamiento_horas:
+                                    hay_conflicto = True
+                                    motivo_conflicto = f"Solapamiento de horas detectado el {fecha_actual}"
+                                    print(f"DEBUG: ¡CONFLICTO DE HORAS DETECTADO en {fecha_actual}!")
+                                    break
+                            
+                            fecha_actual += timedelta(days=1)
+                    else:
+                        # Si NO hay horas, cualquier solapamiento de fechas es conflicto
+                        hay_conflicto = True
+                        motivo_conflicto = "Solapamiento de fechas detectado (sin horas específicas)"
+                        print(f"DEBUG: ¡CONFLICTO DE FECHAS DETECTADO!")
+                
+                if hay_conflicto:
+                    conflictos_detectados.append({
+                        "id_mision": viatico.id_mision,
+                        "fecha_salida": viatico.fecha_salida.isoformat() if viatico.fecha_salida else None,
+                        "fecha_retorno": viatico.fecha_retorno.isoformat() if viatico.fecha_retorno else None,
+                        "motivo": motivo_conflicto
+                    })
+                    print(f"DEBUG: ¡CONFLICTO FINAL DETECTADO! Misión {viatico.id_mision}: {motivo_conflicto}")
+                else:
+                    print(f"DEBUG: No hay conflicto con misión {viatico.id_mision}")
+                
+                # Agregar a detalles independientemente del conflicto
+                detalles.append({
+                    "id_mision": viatico.id_mision,
+                    "fecha_salida": viatico.fecha_salida.isoformat() if viatico.fecha_salida else None,
+                    "fecha_retorno": viatico.fecha_retorno.isoformat() if viatico.fecha_retorno else None,
+                    "hora_salida": str(viatico.hora_salida) if viatico.hora_salida else None,
+                    "hora_retorno": str(viatico.hora_retorno) if viatico.hora_retorno else None
+                })
+        
+        # Determinar resultado final
+        tiene_viaticos = len(conflictos_detectados) > 0
+        
+        if tiene_viaticos:
+            mensaje = f"Ya tienes {len(conflictos_detectados)} viático(s) registrado(s) que se solapan con el rango solicitado ({request.fecha_inicio} a {request.fecha_fin})."
+        else:
+            mensaje = "No hay conflictos de viáticos en el rango de fechas solicitado."
+        
+        print(f"DEBUG: Resultado final - tiene_viaticos: {tiene_viaticos}")
+        print(f"DEBUG: Conflictos detectados: {len(conflictos_detectados)}")
+        
+        return ViaticoValidationResponse(
+            tiene_viaticos_en_rango=tiene_viaticos,
+            mensaje=mensaje,
+            detalles={
+                "viaticos_existentes": detalles,
+                "conflictos_detectados": conflictos_detectados
+            }
+        )
+        
+    except Exception as e:
+        print(f"Error validando viáticos en rango: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error validando viáticos: {str(e)}"
+        )
+
+@router.post("/validate-viaticos-dia", summary="Validar viáticos en día específico")
+async def validate_viaticos_dia(
+    request: ViaticoDiaValidationRequest,
+    db_financiero: Session = Depends(get_db_financiero),
+    db_rrhh: Session = Depends(get_db_rrhh),
+    current_employee: dict = Depends(get_current_employee)
+):
+    """
+    Verificar si ya tiene desayuno, almuerzo, cena o hospedaje registrado para ese día específico.
+    
+    **Características:**
+    - Verifica cada servicio por separado (desayuno, almuerzo, cena, hospedaje)
+    - Excluye misiones rechazadas o canceladas
+    - Proporciona detalles completos de los viáticos del día
+    
+    **Parámetros:**
+    - fecha: Fecha específica a validar (formato YYYY-MM-DD)
+    
+    **Respuesta:**
+    - tiene_desayuno: true si tiene desayuno registrado
+    - tiene_almuerzo: true si tiene almuerzo registrado
+    - tiene_cena: true si tiene cena registrada
+    - tiene_hospedaje: true si tiene hospedaje registrado
+    - mensaje: Descripción del resultado
+    - detalles: Información detallada de viáticos del día
+    """
+    try:
+        personal_id = current_employee["personal_id"]
+        
+        # Obtener el usuario_id del empleado
+        usuario_id = get_usuario_for_employee(personal_id, db_financiero)
+        
+        # Consultar viáticos para el día específico (optimizada)
+        query = """
+            SELECT iv.fecha, iv.monto_desayuno, iv.monto_almuerzo, iv.monto_cena, iv.monto_hospedaje,
+                   m.id_mision, m.numero_solicitud
+            FROM items_viaticos iv
+            INNER JOIN misiones m ON iv.id_mision = m.id_mision
+            WHERE m.beneficiario_personal_id = :personal_id
+            AND iv.fecha = :fecha
+            AND m.id_estado_flujo NOT IN (4, 5)  -- Excluir estados rechazados o cancelados
+            ORDER BY m.id_mision DESC
+        """
+        
+        result = db_financiero.execute(text(query), {
+            "personal_id": personal_id,
+            "fecha": request.fecha
+        })
+        
+        viaticos_dia = result.fetchall()
+        
+        # Inicializar variables
+        tiene_desayuno = False
+        tiene_almuerzo = False
+        tiene_cena = False
+        tiene_hospedaje = False
+        detalles = []
+        
+        # Verificar cada viático del día
+        for viatico in viaticos_dia:
+            if viatico.monto_desayuno and viatico.monto_desayuno > 0:
+                tiene_desayuno = True
+            if viatico.monto_almuerzo and viatico.monto_almuerzo > 0:
+                tiene_almuerzo = True
+            if viatico.monto_cena and viatico.monto_cena > 0:
+                tiene_cena = True
+            if viatico.monto_hospedaje and viatico.monto_hospedaje > 0:
+                tiene_hospedaje = True
+            
+            detalles.append({
+                "id_mision": viatico.id_mision,
+                "numero_solicitud": viatico.numero_solicitud,
+                "fecha": viatico.fecha.isoformat(),
+                "monto_desayuno": float(viatico.monto_desayuno) if viatico.monto_desayuno else 0,
+                "monto_almuerzo": float(viatico.monto_almuerzo) if viatico.monto_almuerzo else 0,
+                "monto_cena": float(viatico.monto_cena) if viatico.monto_cena else 0,
+                "monto_hospedaje": float(viatico.monto_hospedaje) if viatico.monto_hospedaje else 0
+            })
+        
+        # Construir mensaje
+        servicios_registrados = []
+        if tiene_desayuno:
+            servicios_registrados.append("desayuno")
+        if tiene_almuerzo:
+            servicios_registrados.append("almuerzo")
+        if tiene_cena:
+            servicios_registrados.append("cena")
+        if tiene_hospedaje:
+            servicios_registrados.append("hospedaje")
+        
+        if servicios_registrados:
+            mensaje = f"Ya tiene registrado: {', '.join(servicios_registrados)} para el {request.fecha}"
+        else:
+            mensaje = f"No tiene viáticos registrados para el {request.fecha}"
+        
+        return ViaticoDiaValidationResponse(
+            tiene_desayuno=tiene_desayuno,
+            tiene_almuerzo=tiene_almuerzo,
+            tiene_cena=tiene_cena,
+            tiene_hospedaje=tiene_hospedaje,
+            mensaje=mensaje,
+            detalles={
+                "viaticos_dia": detalles,
+                "servicios_registrados": servicios_registrados
+            }
+        )
+        
+    except Exception as e:
+        print(f"Error validando viáticos por día: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error validando viáticos por día: {str(e)}"
         )

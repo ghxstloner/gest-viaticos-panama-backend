@@ -52,47 +52,125 @@ class PDFReportViaticosService:
             'PAGADO'
         ]
     
-    def _get_required_signatures_for_state(self, estado_actual: str) -> Dict[str, bool]:
+    def _get_required_signatures_for_state(self, mission, estado_actual: str) -> Dict[str, Dict]:
         """
-        Determina qué firmas deben mostrarse según el estado actual de la misión.
-        Retorna un diccionario con las firmas requeridas (solo las 4 existentes).
+        Determina qué firmas deben mostrarse según el estado actual de la misión y los IDs de aprobadores.
+        Retorna un diccionario con información de los usuarios que aprobaron.
         """
-        required_signatures = {
-            'tesoreria': False,
-            'presupuesto': False,
-            'contabilidad': False,
-            'finanzas': False
-        }
+        required_signatures = {}
         
-        # Estados que indican que la misión ha pasado por cada departamento
-        estados_tesoreria = [ 'PENDIENTE_ASIGNACION_PRESUPUESTO', 
-                           'PENDIENTE_CONTABILIDAD', 'PENDIENTE_APROBACION_FINANZAS', 
-                           'PENDIENTE_REFRENDO_CGR', 'APROBADO_PARA_PAGO', 'PAGADO'
-                           ]
-        
-        estados_presupuesto = ['PENDIENTE_CONTABILIDAD', 
-                             'PENDIENTE_APROBACION_FINANZAS', 'PENDIENTE_REFRENDO_CGR', 
-                             'APROBADO_PARA_PAGO', 'PAGADO']
-        
-        estados_contabilidad = ['PENDIENTE_APROBACION_FINANZAS', 
-                              'PENDIENTE_REFRENDO_CGR', 'APROBADO_PARA_PAGO', 'PAGADO']
-        
-        estados_finanzas = ['PENDIENTE_REFRENDO_CGR', 
-                          'APROBADO_PARA_PAGO', 'PAGADO']
-        
-        # Determinar qué firmas mostrar basándose en el estado actual
-        if estado_actual in estados_tesoreria:
-            required_signatures['tesoreria'] = True
+        try:
+            print(f"🔍 _get_required_signatures_for_state - Mission ID: {mission.id_mision}")
+            print(f"🔍 _get_required_signatures_for_state - Estado actual: {estado_actual}")
+            print(f"🔍 _get_required_signatures_for_state - IDs: jefe={mission.id_jefe}, tesoreria={mission.id_tesoreria}, presupuesto={mission.id_presupuesto}, contabilidad={mission.id_contabilidad}, finanzas={mission.id_finanzas}")
             
-        if estado_actual in estados_presupuesto:
-            required_signatures['presupuesto'] = True
+            # Estados que indican que la misión ha pasado por cada departamento
+            # Estados que indican que la misión ha pasado por cada departamento
+            # Incluir más estados para asegurar que las firmas aparezcan
+            estados_tesoreria = ['PENDIENTE_ASIGNACION_PRESUPUESTO', 'PENDIENTE_CONTABILIDAD', 
+                               'PENDIENTE_APROBACION_FINANZAS', 'PENDIENTE_REFRENDO_CGR', 
+                               'APROBADO_PARA_PAGO', 'PAGADO', 'DEVUELTO_CORRECCION']
             
-        if estado_actual in estados_contabilidad:
-            required_signatures['contabilidad'] = True
+            estados_presupuesto = ['PENDIENTE_CONTABILIDAD', 'PENDIENTE_APROBACION_FINANZAS', 
+                                 'PENDIENTE_REFRENDO_CGR', 'APROBADO_PARA_PAGO', 'PAGADO', 
+                                 'DEVUELTO_CORRECCION']
             
-        if estado_actual in estados_finanzas:
-            required_signatures['finanzas'] = True
+            estados_contabilidad = ['PENDIENTE_APROBACION_FINANZAS', 'PENDIENTE_REFRENDO_CGR', 
+                                  'APROBADO_PARA_PAGO', 'PAGADO', 'DEVUELTO_CORRECCION']
             
+            estados_finanzas = ['PENDIENTE_REFRENDO_CGR', 'APROBADO_PARA_PAGO', 'PAGADO']
+            
+            # También mostrar firmas si el estado está en una etapa anterior pero hay ID asignado
+            # (significa que ya pasó por esa etapa en algún momento)
+            
+            # Obtener información del jefe (si existe)
+            if mission.id_jefe:
+                print(f"🔍 _get_required_signatures_for_state - Procesando jefe ID: {mission.id_jefe}")
+                jefe_signature = self._get_jefe_signature(mission.id_jefe)
+                jefe_name = self._get_employee_name_from_rrhh(mission.id_jefe)
+                print(f"🔍 _get_required_signatures_for_state - Jefe signature: {jefe_signature}, name: {jefe_name}")
+                
+                if jefe_signature and jefe_name:
+                    required_signatures['jefe'] = {
+                        'user_id': mission.id_jefe,
+                        'signature_path': jefe_signature,
+                        'name': jefe_name,
+                        'is_jefe': True
+                    }
+                    print(f"🔍 _get_required_signatures_for_state - Jefe agregado a required_signatures")
+        except Exception as e:
+            print(f"❌ Error en _get_required_signatures_for_state (jefe): {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # Determinar qué firmas de usuarios financieros mostrar
+        # Mostrar firma si: (estado actual indica que pasó por esa etapa) O (hay ID asignado)
+        try:
+            # TESORERÍA
+            if (estado_actual in estados_tesoreria or mission.id_tesoreria) and mission.id_tesoreria:
+                print(f"🔍 _get_required_signatures_for_state - Procesando tesoreria ID: {mission.id_tesoreria}")
+                user_signature = self._get_user_signature(mission.id_tesoreria)
+                user_name = self._get_user_name(mission.id_tesoreria)
+                print(f"🔍 _get_required_signatures_for_state - Tesoreria signature: {user_signature}, name: {user_name}")
+                # Incluir siempre si hay ID asignado
+                required_signatures['tesoreria'] = {
+                    'user_id': mission.id_tesoreria,
+                    'signature_path': user_signature,
+                    'name': user_name or 'Tesorería',
+                    'is_jefe': False
+                }
+                print(f"🔍 _get_required_signatures_for_state - Tesoreria agregada a required_signatures")
+                
+            # PRESUPUESTO
+            if (estado_actual in estados_presupuesto or mission.id_presupuesto) and mission.id_presupuesto:
+                print(f"🔍 _get_required_signatures_for_state - Procesando presupuesto ID: {mission.id_presupuesto}")
+                user_signature = self._get_user_signature(mission.id_presupuesto)
+                user_name = self._get_user_name(mission.id_presupuesto)
+                print(f"🔍 _get_required_signatures_for_state - Presupuesto signature: {user_signature}, name: {user_name}")
+                # Incluir siempre si hay ID asignado
+                required_signatures['presupuesto'] = {
+                    'user_id': mission.id_presupuesto,
+                    'signature_path': user_signature,
+                    'name': user_name or 'Presupuesto',
+                    'is_jefe': False
+                }
+                print(f"🔍 _get_required_signatures_for_state - Presupuesto agregado a required_signatures")
+                
+            # CONTABILIDAD
+            if (estado_actual in estados_contabilidad or mission.id_contabilidad) and mission.id_contabilidad:
+                print(f"🔍 _get_required_signatures_for_state - Procesando contabilidad ID: {mission.id_contabilidad}")
+                user_signature = self._get_user_signature(mission.id_contabilidad)
+                user_name = self._get_user_name(mission.id_contabilidad)
+                print(f"🔍 _get_required_signatures_for_state - Contabilidad signature: {user_signature}, name: {user_name}")
+                # Incluir siempre si hay ID asignado
+                required_signatures['contabilidad'] = {
+                    'user_id': mission.id_contabilidad,
+                    'signature_path': user_signature,
+                    'name': user_name or 'Contabilidad',
+                    'is_jefe': False
+                }
+                print(f"🔍 _get_required_signatures_for_state - Contabilidad agregada a required_signatures")
+                
+            # FINANZAS
+            if (estado_actual in estados_finanzas or mission.id_finanzas) and mission.id_finanzas:
+                print(f"🔍 _get_required_signatures_for_state - Procesando finanzas ID: {mission.id_finanzas}")
+                user_signature = self._get_user_signature(mission.id_finanzas)
+                user_name = self._get_user_name(mission.id_finanzas)
+                print(f"🔍 _get_required_signatures_for_state - Finanzas signature: {user_signature}, name: {user_name}")
+                # Incluir siempre si hay ID asignado
+                required_signatures['finanzas'] = {
+                    'user_id': mission.id_finanzas,
+                    'signature_path': user_signature,
+                    'name': user_name or 'Finanzas',
+                    'is_jefe': False
+                }
+                print(f"🔍 _get_required_signatures_for_state - Finanzas agregado a required_signatures")
+        except Exception as e:
+            print(f"❌ Error en _get_required_signatures_for_state (usuarios financieros): {e}")
+            import traceback
+            traceback.print_exc()
+            
+        print(f"🔍 _get_required_signatures_for_state - Required signatures final: {list(required_signatures.keys())}")
         return required_signatures
 
     def _get_user_signature(self, user_id: int) -> Optional[str]:
@@ -107,6 +185,50 @@ class PDFReportViaticosService:
             return row.firma if row else None
         except Exception as e:
             print(f"Error obteniendo firma del usuario {user_id}: {e}")
+            return None
+
+    def _get_jefe_signature(self, jefe_id: int) -> Optional[str]:
+        """Obtener firma del jefe desde la tabla firmas_jefes"""
+        try:
+            from sqlalchemy import text
+            result = self.db.execute(text("""
+                SELECT firma FROM firmas_jefes 
+                WHERE personal_id = :jefe_id AND firma IS NOT NULL
+            """), {"jefe_id": jefe_id})
+            row = result.fetchone()
+            return row.firma if row else None
+        except Exception as e:
+            print(f"Error obteniendo firma del jefe {jefe_id}: {e}")
+            return None
+
+    def _get_employee_name_from_rrhh(self, personal_id: int) -> Optional[str]:
+        """Obtener nombre del empleado desde la tabla nompersonal de RRHH"""
+        try:
+            from sqlalchemy import text
+            result = self.db.execute(text("""
+                SELECT apenom FROM aitsa_rrhh.nompersonal 
+                WHERE personal_id = :personal_id
+            """), {"personal_id": personal_id})
+            row = result.fetchone()
+            return row.apenom if row else None
+        except Exception as e:
+            print(f"Error obteniendo nombre del empleado {personal_id}: {e}")
+            return None
+
+    def _get_user_name(self, user_id: int) -> Optional[str]:
+        """Obtener nombre del usuario financiero desde la tabla usuarios y nompersonal"""
+        try:
+            from sqlalchemy import text
+            result = self.db.execute(text("""
+                SELECT np.apenom 
+                FROM usuarios u
+                JOIN aitsa_rrhh.nompersonal np ON u.personal_id_rrhh = np.personal_id
+                WHERE u.id_usuario = :user_id
+            """), {"user_id": user_id})
+            row = result.fetchone()
+            return row.apenom if row else None
+        except Exception as e:
+            print(f"Error obteniendo nombre del usuario {user_id}: {e}")
             return None
 
     def _get_beneficiary_name(self, personal_id: int) -> str:
@@ -999,10 +1121,82 @@ class PDFReportViaticosService:
         ]))
 
                 
-        # Obtener información de la vicepresidencia y vicepresidente
+        # Obtener información de la vicepresidencia y vicepresidente (para el solicitante)
         beneficiary_vicepresidency = self._get_beneficiary_vicepresidency(mission.beneficiario_personal_id)
         vicepresidency_chief_name = self._get_vicepresidency_chief_name(mission.beneficiario_personal_id)
         
+        # Obtener firmas requeridas según el estado actual y los IDs de aprobadores reales
+        try:
+            required_signatures = self._get_required_signatures_for_state(mission, mission.estado_flujo.nombre_estado)
+            print(f"🔍 generate_viaticos_transporte_pdf - Required signatures obtenidas: {list(required_signatures.keys())}")
+        except Exception as e:
+            print(f"❌ Error obteniendo required_signatures: {e}")
+            required_signatures = {}
+        
+
+        
+
+      
+        
+        # Crear elementos de firma para cada departamento usando los usuarios que realmente aprobaron
+        tesoreria_element = Paragraph("", self.table_data_style)
+        presupuesto_element = Paragraph("", self.table_data_style)
+        contabilidad_element = Paragraph("", self.table_data_style)
+        finanzas_element = Paragraph("", self.table_data_style)
+        
+        try:
+            if 'tesoreria' in required_signatures:
+                signature_path = required_signatures['tesoreria'].get('signature_path')
+                if signature_path:
+                    tesoreria_element = Image(signature_path, width=40*mm, height=15*mm)
+                    print(f"🔍 generate_viaticos_transporte_pdf - Tesoreria element creado con firma: {signature_path}")
+                
+            if 'presupuesto' in required_signatures:
+                signature_path = required_signatures['presupuesto'].get('signature_path')
+                if signature_path:
+                    presupuesto_element = Image(signature_path, width=40*mm, height=15*mm)
+                    print(f"🔍 generate_viaticos_transporte_pdf - Presupuesto element creado con firma: {signature_path}")
+                
+            if 'contabilidad' in required_signatures:
+                signature_path = required_signatures['contabilidad'].get('signature_path')
+                if signature_path:
+                    contabilidad_element = Image(signature_path, width=40*mm, height=15*mm)
+                    print(f"🔍 generate_viaticos_transporte_pdf - Contabilidad element creado con firma: {signature_path}")
+                
+            if 'finanzas' in required_signatures:
+                signature_path = required_signatures['finanzas'].get('signature_path')
+                if signature_path:
+                    finanzas_element = Image(signature_path, width=40*mm, height=15*mm)
+                    print(f"🔍 generate_viaticos_transporte_pdf - Finanzas element creado con firma: {signature_path}")
+        except Exception as e:
+            print(f"❌ Error creando elementos de firma: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # Obtener información del jefe que realmente autorizó (si existe)
+        jefe_name = None
+        jefe_signature_element = Paragraph("", self.table_data_style)
+        
+        try:
+            if 'jefe' in required_signatures:
+                jefe_info = required_signatures['jefe']
+                jefe_name = jefe_info.get('name')
+                signature_path = jefe_info.get('signature_path')
+                if signature_path:
+                    jefe_signature_element = Image(signature_path, width=40*mm, height=15*mm)
+                    print(f"🔍 generate_viaticos_transporte_pdf - Jefe signature element creado: {signature_path}")
+            
+            # Si no hay jefe específico, usar la información de vicepresidencia como fallback
+            if not jefe_name:
+                jefe_name = f"{beneficiary_vicepresidency} - {vicepresidency_chief_name}"
+                print(f"🔍 generate_viaticos_transporte_pdf - Usando jefe fallback: {jefe_name}")
+        except Exception as e:
+            print(f"❌ Error procesando información del jefe: {e}")
+            jefe_name = f"{beneficiary_vicepresidency} - {vicepresidency_chief_name}"
+            jefe_signature_element = Paragraph("", self.table_data_style)
+        
+        # TABLA DE FIRMA (al lado de partidas presupuestarias)
+        # Esta tabla contiene tanto el responsable de la unidad como el que autoriza
         firma_data = [
             [Paragraph("Nombre y Firma del Responsable de la Unidad Administrativa Solicitante:", 
                       ParagraphStyle('Left', parent=self.styles['Normal'], alignment=TA_LEFT, fontSize=9))],
@@ -1011,26 +1205,33 @@ class PDFReportViaticosService:
             [Paragraph("", self.table_data_style)],   # Espacio vacío
             [Paragraph("Nombre y Firma del Responsable que Autoriza el Trámite de la Solicitud y Pago de Viático y Transporte:", 
                       ParagraphStyle('Left', parent=self.styles['Normal'], alignment=TA_LEFT, fontSize=9))],
-            [Paragraph(f"{beneficiary_vicepresidency} - {vicepresidency_chief_name}", 
+            [Paragraph(jefe_name, 
                       ParagraphStyle('Left', parent=self.styles['Normal'], alignment=TA_LEFT, fontSize=9))],
-            [Paragraph("", self.table_data_style)]   # Solo una fila vacía para firma
+            [jefe_signature_element]   # Firma real del jefe o espacio vacío
         ]
+        print(f"🔍 generate_viaticos_transporte_pdf - firma_data creada con jefe: {jefe_name}")
 
-        firma_row_heights = [10*mm, 6*mm, 15*mm, 10*mm, 6*mm, 15*mm]  # Ajustado para 6 filas 
+        firma_row_heights = [10*mm, 6*mm, 15*mm, 10*mm, 6*mm, 15*mm]  # 6 filas
 
-        # Crear tabla de firma con estructura de caja
+        # Crear tabla de firma con estructura correcta (sin colores)
         firma_table = Table(firma_data, colWidths=[95*mm], rowHeights=firma_row_heights)
         firma_table.setStyle(TableStyle([
             # Bordes
             ('GRID', (0, 0), (-1, -1), 1, colors.black),
 
-            # Estilos de texto
+            # Estilos de texto (sin colores de fondo)
             ('FONTSIZE', (0, 0), (-1, -1), 9),
             ('ALIGN', (0, 0), (-1, -1), 'LEFT'),  # Todo alineado a la izquierda
+            ('ALIGN', (0, 5), (0, 5), 'CENTER'),  # Firma del jefe centrada horizontalmente
             ('VALIGN', (0, 0), (0, 1), 'TOP'),    # Header y texto arriba
             ('VALIGN', (0, 2), (0, 2), 'MIDDLE'), # Espacio de firma centrado verticalmente
+            ('VALIGN', (0, 3), (0, 4), 'TOP'),    # Header y texto del jefe arriba
+            ('VALIGN', (0, 5), (0, 5), 'MIDDLE'), # Espacio de firma del jefe centrado
         ]))
         
+        print(f"🔍 generate_viaticos_transporte_pdf - firma_table creada correctamente")
+        
+        # Crear el contenedor side-by-side con partidas y firmas
         side_by_side_data = [
             [partidas_table, firma_table]
         ]
@@ -1044,14 +1245,14 @@ class PDFReportViaticosService:
             ('RIGHTPADDING', (0, 0), (-1, -1), 0),
             ('TOPPADDING', (0, 0), (-1, -1), 0),
             ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
-            # NO eliminar bordes del contenedor para preservar los de las tablas internas
         ]))
         
         story.append(side_by_side_container)
         story.append(Spacer(1, 10*mm))
         
+        # TABLA DE FIRMAS DE PREPARADOR Y BENEFICIARIO
         firmas_data = [
-                        [
+            [
                 Paragraph("Nombre y Firma de quien Prepara el Formulario", 
                         ParagraphStyle('Left', parent=self.styles['Normal'], alignment=TA_LEFT, fontSize=9)),
                 Paragraph("Nombre y Firma del Beneficiario", 
@@ -1077,22 +1278,6 @@ class PDFReportViaticosService:
         story.append(Spacer(1, 5*mm))
         
         # DEPARTAMENTOS DE AUTORIZACIÓN
-        # Obtener firmas requeridas según el estado actual
-        required_signatures = self._get_required_signatures_for_state(mission.estado_flujo.nombre_estado)
-        
-        # Obtener firmas de usuarios
-        tesoreria_signature = self._get_user_signature(self.signature_user_ids['tesoreria']) if required_signatures['tesoreria'] else None
-        presupuesto_signature = self._get_user_signature(self.signature_user_ids['presupuesto']) if required_signatures['presupuesto'] else None
-        contabilidad_signature = self._get_user_signature(self.signature_user_ids['contabilidad']) if required_signatures['contabilidad'] else None
-        finanzas_signature = self._get_user_signature(self.signature_user_ids['finanzas']) if required_signatures['finanzas'] else None
-        
-        # Crear elementos de firma para cada departamento
-        tesoreria_element = Image(tesoreria_signature, width=40*mm, height=15*mm) if tesoreria_signature else Paragraph("", self.table_data_style)
-        presupuesto_element = Image(presupuesto_signature, width=40*mm, height=15*mm) if presupuesto_signature else Paragraph("", self.table_data_style)
-        contabilidad_element = Image(contabilidad_signature, width=40*mm, height=15*mm) if contabilidad_signature else Paragraph("", self.table_data_style)
-        finanzas_element = Image(finanzas_signature, width=40*mm, height=15*mm) if finanzas_signature else Paragraph("", self.table_data_style)
-        
-        # DEPARTAMENTOS DE AUTORIZACIÓN
         dept_data = [
             [
                 Paragraph("Nombre y Firma del Director de Administración y/o Finanzas:", 
@@ -1105,7 +1290,7 @@ class PDFReportViaticosService:
                 Paragraph("", self.table_data_style)
             ],
             [
-                finanzas_element if required_signatures['finanzas'] else Paragraph("", self.table_data_style),
+                finanzas_element,
                 Paragraph("", self.table_data_style)   # Espacio para firma de máxima autoridad
             ]
         ]
@@ -1135,9 +1320,9 @@ class PDFReportViaticosService:
                          ParagraphStyle('Left', parent=self.styles['Normal'], alignment=TA_LEFT, fontSize=9))
             ],
             [
-                tesoreria_element if required_signatures['tesoreria'] else Paragraph("", self.table_data_style),
-                contabilidad_element if required_signatures['contabilidad'] else Paragraph("", self.table_data_style),
-                presupuesto_element if required_signatures['presupuesto'] else Paragraph("", self.table_data_style)
+                tesoreria_element,
+                contabilidad_element,
+                presupuesto_element
             ]
         ]
 

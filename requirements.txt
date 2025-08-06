@@ -13,4 +13,5 @@ xlsxwriter==3.2.0
 aiofiles==24.1.0
 pydantic[email]
 Pillow==10.4.0
-reportlab==4.0.4  
+reportlab==4.0.4
+fastapi-mail==1.4.1  

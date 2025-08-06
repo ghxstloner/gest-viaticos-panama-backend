@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db_financiero
-from app.api.deps import get_current_user, get_current_employee
+from app.api.deps import get_current_user, get_current_employee, get_current_user_universal
 from app.models.user import Usuario
 from app.services.configuration import ConfigurationService
 from app.schemas.configuration import (
@@ -300,6 +300,69 @@ async def get_logo_public(
     return FileResponse(file_path)
 
 # === CONFIGURACIÓN SISTEMA ===
+
+@router.get("/sistema/cutoff-times", response_model=Dict[str, str])
+async def get_cutoff_times(
+    db: Session = Depends(get_db_financiero),
+    current_user = Depends(get_current_user_universal)
+):
+    """Obtiene las configuraciones de hora de corte para comidas y hospedaje"""
+    service = ConfigurationService(db)
+    
+    # Obtener las configuraciones específicas
+    cutoff_times = {}
+    
+    # Hora de inicio desayuno
+    desayuno_inicio_config = service.get_configuracion_sistema_by_clave("HORA_INICIO_DESAYUNO")
+    if desayuno_inicio_config and desayuno_inicio_config.tipo_dato == "TIME":
+        cutoff_times["hora_inicio_desayuno"] = desayuno_inicio_config.valor
+    else:
+        cutoff_times["hora_inicio_desayuno"] = "06:00"  # Valor por defecto
+    
+    # Hora de corte desayuno
+    desayuno_config = service.get_configuracion_sistema_by_clave("HORA_CORTE_DESAYUNO")
+    if desayuno_config and desayuno_config.tipo_dato == "TIME":
+        cutoff_times["hora_corte_desayuno"] = desayuno_config.valor
+    else:
+        cutoff_times["hora_corte_desayuno"] = "08:00"  # Valor por defecto
+    
+    # Hora de inicio almuerzo
+    almuerzo_inicio_config = service.get_configuracion_sistema_by_clave("HORA_INICIO_ALMUERZO")
+    if almuerzo_inicio_config and almuerzo_inicio_config.tipo_dato == "TIME":
+        cutoff_times["hora_inicio_almuerzo"] = almuerzo_inicio_config.valor
+    else:
+        cutoff_times["hora_inicio_almuerzo"] = "11:00"  # Valor por defecto
+    
+    # Hora de corte almuerzo
+    almuerzo_config = service.get_configuracion_sistema_by_clave("HORA_CORTE_ALMUERZO")
+    if almuerzo_config and almuerzo_config.tipo_dato == "TIME":
+        cutoff_times["hora_corte_almuerzo"] = almuerzo_config.valor
+    else:
+        cutoff_times["hora_corte_almuerzo"] = "14:00"  # Valor por defecto
+    
+    # Hora de inicio cena
+    cena_inicio_config = service.get_configuracion_sistema_by_clave("HORA_INICIO_CENA")
+    if cena_inicio_config and cena_inicio_config.tipo_dato == "TIME":
+        cutoff_times["hora_inicio_cena"] = cena_inicio_config.valor
+    else:
+        cutoff_times["hora_inicio_cena"] = "18:00"  # Valor por defecto
+    
+    # Hora de corte cena
+    cena_config = service.get_configuracion_sistema_by_clave("HORA_CORTE_CENA")
+    if cena_config and cena_config.tipo_dato == "TIME":
+        cutoff_times["hora_corte_cena"] = cena_config.valor
+    else:
+        cutoff_times["hora_corte_cena"] = "20:00"  # Valor por defecto
+    
+    
+    # Horas para hospedaje
+    hospedaje_config = service.get_configuracion_sistema_by_clave("HORAS_PARA_HOSPEDAJE")
+    if hospedaje_config and hospedaje_config.tipo_dato == "NUMBER":
+        cutoff_times["horas_para_hospedaje"] = hospedaje_config.valor
+    else:
+        cutoff_times["horas_para_hospedaje"] = "12"  # Valor por defecto
+    
+    return cutoff_times
 
 @router.get("/sistema", response_model=List[ConfiguracionSistema])
 async def get_configuraciones_sistema(

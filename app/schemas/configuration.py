@@ -58,7 +58,7 @@ class ConfiguracionGeneral(ConfiguracionGeneralBase):
 class ConfiguracionSistemaBase(BaseModel):
     clave: str
     valor: str
-    tipo_dato: Literal['STRING', 'NUMBER', 'BOOLEAN', 'JSON'] = "STRING"
+    tipo_dato: Literal['STRING', 'NUMBER', 'BOOLEAN', 'JSON', 'TIME'] = "STRING"
     descripcion: Optional[str] = None
     es_modificable: bool = True
 
@@ -68,7 +68,7 @@ class ConfiguracionSistemaCreate(ConfiguracionSistemaBase):
 class ConfiguracionSistemaUpdate(BaseModel):
     clave: Optional[str] = None
     valor: Optional[str] = None
-    tipo_dato: Optional[Literal['STRING', 'NUMBER', 'BOOLEAN', 'JSON']] = None
+    tipo_dato: Optional[Literal['STRING', 'NUMBER', 'BOOLEAN', 'JSON', 'TIME']] = None
     descripcion: Optional[str] = None
     es_modificable: Optional[bool] = None
 

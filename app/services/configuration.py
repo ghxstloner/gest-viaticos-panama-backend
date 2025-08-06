@@ -65,9 +65,27 @@ class ConfigurationService:
         """Obtiene todas las configuraciones del sistema"""
         return self.db.query(ConfiguracionSistema).order_by(ConfiguracionSistema.clave).all()
 
+    def get_configuraciones_time(self) -> Dict[str, str]:
+        """Obtiene todas las configuraciones de tipo TIME como diccionario"""
+        configs = self.db.query(ConfiguracionSistema).filter(
+            ConfiguracionSistema.tipo_dato == "TIME"
+        ).all()
+        
+        result = {}
+        for config in configs:
+            if self.validate_time_config(config.valor):
+                result[config.clave] = config.valor
+        
+        return result
+
     def get_configuracion_sistema_by_clave(self, clave: str) -> Optional[ConfiguracionSistema]:
         """Obtiene una configuración específica por clave"""
         return self.db.query(ConfiguracionSistema).filter(ConfiguracionSistema.clave == clave).first()
+
+    def validate_time_config(self, valor: str) -> bool:
+        """Valida que un valor sea un formato de hora válido (HH:MM)"""
+        import re
+        return bool(re.match(r'^([01]?[0-9]|2[0-3]):[0-5][0-9]$', valor))
 
     def create_configuracion_sistema(self, config_data: ConfiguracionSistemaCreate) -> ConfiguracionSistema:
         """Crea una nueva configuración del sistema"""
@@ -77,6 +95,13 @@ class ConfigurationService:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"Ya existe una configuración con la clave '{config_data.clave}'"
+            )
+
+        # Validar configuración de tipo TIME
+        if config_data.tipo_dato == "TIME" and not self.validate_time_config(config_data.valor):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"El valor '{config_data.valor}' no es un formato de hora válido. Use formato HH:MM (ej: 08:00, 14:30)"
             )
 
         db_config = ConfiguracionSistema(**config_data.model_dump())
@@ -100,6 +125,15 @@ class ConfigurationService:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"La configuración '{clave}' no es modificable"
             )
+
+        # Validar configuración de tipo TIME si se está actualizando
+        if config_data.tipo_dato == "TIME" or (db_config.tipo_dato == "TIME" and config_data.valor):
+            valor_a_validar = config_data.valor if config_data.valor else db_config.valor
+            if not self.validate_time_config(valor_a_validar):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"El valor '{valor_a_validar}' no es un formato de hora válido. Use formato HH:MM (ej: 08:00, 14:30)"
+                )
 
         # Actualizar solo los campos proporcionados
         update_data = config_data.model_dump(exclude_unset=True)
@@ -280,6 +314,14 @@ class ConfigurationService:
                     import json
                     value = json.loads(value)
                 except:
+                    value = config.valor
+            elif config.tipo_dato == "TIME":
+                # Validar formato HH:MM para horas
+                import re
+                if re.match(r'^([01]?[0-9]|2[0-3]):[0-5][0-9]$', value):
+                    value = value  # Mantener como string en formato HH:MM
+                else:
+                    # Si no es válido, usar valor por defecto o el original
                     value = config.valor
             
             result[config.clave] = value

@@ -678,10 +678,17 @@ class WorkflowService:
             self._validate_employee_supervision(mision, user)
             user_name = user.get("apenom", "Jefe Inmediato")
             user_cedula = user.get('cedula')
+            # Para empleados (dict), usar el personal_id
+            user_id = user.get('personal_id')
         else:
             # Para usuarios financieros, no validar supervisión
             user_name = user.login_username if hasattr(user, 'login_username') else "Usuario Financiero"
             user_cedula = None
+            user_id = user.id_usuario
+        
+        # Registrar el ID del usuario que aprueba como jefe
+        if user_id:
+            mision.id_jefe = user_id
         
         mision.id_estado_flujo = transicion.id_estado_destino
         self._create_history_record(mision, transicion, request_data, user, client_ip)
@@ -729,6 +736,10 @@ class WorkflowService:
     ) -> Dict[str, Any]:
         """Procesa aprobación de tesorería"""
         mensaje = 'Solicitud aprobada por Tesorería'
+        
+        # Registrar el ID del usuario que aprueba en tesorería
+        if isinstance(user, Usuario):
+            mision.id_tesoreria = user.id_usuario
         
         # Para caja menuda, ir directo a aprobado para pago
         if mision.tipo_mision == TipoMision.CAJA_MENUDA:
@@ -798,6 +809,10 @@ class WorkflowService:
         user: Union[Usuario, dict]
     ) -> Dict[str, Any]:
         """Procesa asignación de partidas presupuestarias"""
+        # Registrar el ID del usuario que aprueba en presupuesto
+        if isinstance(user, Usuario):
+            mision.id_presupuesto = user.id_usuario
+            
         mision.id_estado_flujo = transicion.id_estado_destino
         
         # Validar que las partidas existen en el sistema
@@ -860,6 +875,10 @@ class WorkflowService:
         request_data: ContabilidadApprovalRequest,
         user: Union[Usuario, dict]
     ) -> Dict[str, Any]:
+        # Registrar el ID del usuario que aprueba en contabilidad
+        if isinstance(user, Usuario):
+            mision.id_contabilidad = user.id_usuario
+            
         mision.id_estado_flujo = transicion.id_estado_destino
         datos_adicionales = {}
         
@@ -890,6 +909,10 @@ class WorkflowService:
         user: Union[Usuario, dict]
     ) -> Dict[str, Any]:
         """Procesa aprobación final de finanzas"""
+        # Registrar el ID del usuario que aprueba en finanzas
+        if isinstance(user, Usuario):
+            mision.id_finanzas = user.id_usuario
+            
         # Si se especifica monto aprobado, actualizarlo
         if hasattr(request_data, 'monto_aprobado') and request_data.monto_aprobado:
             mision.monto_aprobado = request_data.monto_aprobado
@@ -952,6 +975,8 @@ class WorkflowService:
         user: Union[Usuario, dict]
     ) -> Dict[str, Any]:
         """Procesa refrendo de CGR"""
+
+            
         # Forzar que CGR vaya directo a APROBADO_PARA_PAGO
         estado_pago = self._states_cache.get('APROBADO_PARA_PAGO')
         if estado_pago:

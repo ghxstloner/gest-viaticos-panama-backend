@@ -3,7 +3,7 @@
 from typing import List, Optional, Union
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import text, and_
-from ..models.user import Usuario, Rol, Permiso, RolPermiso
+from ..models.user import Usuario, Rol, Permiso, RolPermiso, FirmaJefe
 from ..schemas.user import UsuarioCreate, UsuarioUpdate, RolCreate, RolUpdate
 from ..core.security import get_password_hash
 from fastapi import HTTPException, status
@@ -153,14 +153,27 @@ class UserService:
         self.db.refresh(user)
         return user
 
-    def upload_signature(self, user_id: int, signature_file: UploadFile) -> str:
+    def upload_signature(self, user_id: int, signature_file: UploadFile, current_user=None) -> str:
         """Upload signature image for a user"""
-        user = self.get_user(user_id)
-        if not user:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found"
-            )
+        # Determinar si es un empleado o usuario financiero
+        is_employee = isinstance(current_user, dict) and current_user.get("user_type") == "employee"
+        
+        if is_employee:
+            # Para empleados, verificar que el personal_id existe
+            personal_id = current_user.get("personal_id")
+            if not personal_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Employee personal_id not found"
+                )
+        else:
+            # Para usuarios financieros, verificar que el usuario existe
+            user = self.get_user(user_id)
+            if not user:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="User not found"
+                )
 
         # Validate file type
         allowed_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp'}
@@ -182,7 +195,11 @@ class UserService:
         # Generate unique filename
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         unique_id = str(uuid.uuid4())[:8]
-        filename = f"firma_{user_id}_{timestamp}_{unique_id}{file_extension}"
+        
+        if is_employee:
+            filename = f"firma_empleado_{personal_id}_{timestamp}_{unique_id}{file_extension}"
+        else:
+            filename = f"firma_{user_id}_{timestamp}_{unique_id}{file_extension}"
         
         # Create uploads/firmas directory if it doesn't exist
         upload_dir = "uploads/firmas"
@@ -199,11 +216,31 @@ class UserService:
             with open(file_path, "wb") as f:
                 f.write(content)
             
-            # Update user's signature path
-            user.firma = f"uploads/firmas/{filename}"
-            self.db.commit()
+            # Update signature path based on user type
+            signature_path = f"uploads/firmas/{filename}"
             
-            return user.firma
+            if is_employee:
+                # Para empleados, guardar en la tabla firmas_jefes
+                existing_firma = self.db.query(FirmaJefe).filter(
+                    FirmaJefe.personal_id == personal_id
+                ).first()
+                
+                if existing_firma:
+                    # Actualizar firma existente
+                    existing_firma.firma = signature_path
+                else:
+                    # Crear nueva entrada
+                    nueva_firma = FirmaJefe(
+                        personal_id=personal_id,
+                        firma=signature_path
+                    )
+                    self.db.add(nueva_firma)
+            else:
+                # Para usuarios financieros, guardar en la tabla usuarios
+                user.firma = signature_path
+            
+            self.db.commit()
+            return signature_path
             
         except Exception as e:
             # Clean up file if it was created
@@ -214,18 +251,29 @@ class UserService:
                 detail=f"Error uploading signature: {str(e)}"
             )
 
-    def delete_signature(self, user_id: int) -> bool:
+    def delete_signature(self, user_id: int, current_user=None) -> bool:
         """Delete user's signature"""
-        user = self.get_user(user_id)
-        if not user:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found"
-            )
-
-        if user.firma:
+        # Determinar si es un empleado o usuario financiero
+        is_employee = isinstance(current_user, dict) and current_user.get("user_type") == "employee"
+        
+        if is_employee:
+            # Para empleados, buscar en la tabla firmas_jefes
+            personal_id = current_user.get("personal_id")
+            if not personal_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Employee personal_id not found"
+                )
+            
+            firma_jefe = self.db.query(FirmaJefe).filter(
+                FirmaJefe.personal_id == personal_id
+            ).first()
+            
+            if not firma_jefe or not firma_jefe.firma:
+                return False
+            
             # Delete file from disk
-            file_path = user.firma
+            file_path = firma_jefe.firma
             if os.path.exists(file_path):
                 try:
                     os.remove(file_path)
@@ -233,11 +281,57 @@ class UserService:
                     print(f"Error deleting signature file: {e}")
             
             # Update database
-            user.firma = None
+            firma_jefe.firma = None
             self.db.commit()
             return True
+        else:
+            # Para usuarios financieros, buscar en la tabla usuarios
+            user = self.get_user(user_id)
+            if not user:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="User not found"
+                )
+
+            if user.firma:
+                # Delete file from disk
+                file_path = user.firma
+                if os.path.exists(file_path):
+                    try:
+                        os.remove(file_path)
+                    except Exception as e:
+                        print(f"Error deleting signature file: {e}")
+                
+                # Update database
+                user.firma = None
+                self.db.commit()
+                return True
+            
+            return False
+
+    def get_signature_path(self, user_id: int = None, personal_id: int = None, current_user=None) -> Optional[str]:
+        """Get signature path for a user or employee"""
+        # Determinar si es un empleado o usuario financiero
+        is_employee = isinstance(current_user, dict) and current_user.get("user_type") == "employee"
         
-        return False
+        if is_employee or personal_id:
+            # Para empleados, buscar en la tabla firmas_jefes
+            search_personal_id = personal_id or current_user.get("personal_id")
+            if not search_personal_id:
+                return None
+            
+            firma_jefe = self.db.query(FirmaJefe).filter(
+                FirmaJefe.personal_id == search_personal_id
+            ).first()
+            
+            return firma_jefe.firma if firma_jefe else None
+        else:
+            # Para usuarios financieros, buscar en la tabla usuarios
+            if not user_id:
+                return None
+                
+            user = self.get_user(user_id)
+            return user.firma if user else None
 
     def delete_user(self, user_id: int) -> bool:
         """Delete user (soft delete by deactivating)"""

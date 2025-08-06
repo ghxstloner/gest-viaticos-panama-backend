@@ -290,6 +290,13 @@ class Mision(BaseModel):
     observacion: Optional[str] = None
     beneficiario_nombre: Optional[str] = None
     
+    # Campos para tracking de usuarios que aprueban en cada etapa del workflow
+    id_tesoreria: Optional[int] = None
+    id_presupuesto: Optional[int] = None
+    id_contabilidad: Optional[int] = None
+    id_finanzas: Optional[int] = None
+    id_jefe: Optional[int] = None
+    
     estado_flujo: "EstadoFlujo"
     items_viaticos: List[ItemViatico] = []
     items_transporte: List[ItemTransporte] = []
@@ -401,3 +408,29 @@ class DashboardStats(BaseModel):
     missions_by_type: Dict[str, int]
     missions_by_state: Dict[str, int]
     recent_missions: List[Dict[str, Any]]
+
+class ViaticoValidationRequest(BaseModel):
+    """Schema para validar viáticos en un rango de fechas"""
+    fecha_inicio: date
+    fecha_fin: date
+    hora_inicio: Optional[str] = Field(None, pattern=r'^([01]?[0-9]|2[0-3]):[0-5][0-9]$')
+    hora_fin: Optional[str] = Field(None, pattern=r'^([01]?[0-9]|2[0-3]):[0-5][0-9]$')
+
+class ViaticoValidationResponse(BaseModel):
+    """Response para validación de viáticos"""
+    tiene_viaticos_en_rango: bool
+    mensaje: str
+    detalles: Optional[Dict[str, Any]] = None
+
+class ViaticoDiaValidationRequest(BaseModel):
+    """Schema para validar viáticos en un día específico"""
+    fecha: date
+
+class ViaticoDiaValidationResponse(BaseModel):
+    """Response para validación de viáticos por día"""
+    tiene_desayuno: bool
+    tiene_almuerzo: bool
+    tiene_cena: bool
+    tiene_hospedaje: bool
+    mensaje: str
+    detalles: Optional[Dict[str, Any]] = None

@@ -1,6 +1,8 @@
 from typing import List, Dict, Any, Union
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
+import os
 
 from app.core.database import get_db_financiero
 from app.schemas.user import Usuario, UsuarioCreate, UsuarioUpdate, Rol, RolCreate, RolUpdate, Permiso, EmpleadoInfo
@@ -90,11 +92,11 @@ async def upload_signature(
     user_id: int,
     signature_file: UploadFile = File(...),
     db: Session = Depends(get_db_financiero),
-    current_user: UsuarioModel = Depends(get_current_user)
+    current_user: Union[UsuarioModel, dict] = Depends(get_current_user_universal)
 ):
     """Upload signature image for a user"""
     user_service = UserService(db)
-    signature_path = user_service.upload_signature(user_id, signature_file)
+    signature_path = user_service.upload_signature(user_id, signature_file, current_user)
     return {
         "message": "Signature uploaded successfully",
         "signature_path": signature_path
@@ -104,15 +106,55 @@ async def upload_signature(
 async def delete_signature(
     user_id: int,
     db: Session = Depends(get_db_financiero),
-    current_user: UsuarioModel = Depends(get_current_user)
+    current_user: Union[UsuarioModel, dict] = Depends(get_current_user_universal)
 ):
     """Delete user's signature"""
     user_service = UserService(db)
-    success = user_service.delete_signature(user_id)
+    success = user_service.delete_signature(user_id, current_user)
     if success:
         return {"message": "Signature deleted successfully"}
     else:
         return {"message": "No signature found to delete"}
+
+@router.get("/{user_id}/signature")
+async def get_signature(
+    user_id: int,
+    db: Session = Depends(get_db_financiero),
+    current_user: Union[UsuarioModel, dict] = Depends(get_current_user_universal)
+):
+    """Get user's signature file"""
+    user_service = UserService(db)
+    signature_path = user_service.get_signature_path(user_id=user_id, current_user=current_user)
+    
+    if not signature_path:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Signature not found"
+        )
+    
+    # Verificar que el archivo existe en el sistema de archivos
+    if not os.path.exists(signature_path):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Signature file not found on disk"
+        )
+    
+    # Determinar el tipo de contenido basado en la extensión del archivo
+    file_extension = os.path.splitext(signature_path)[1].lower()
+    media_type_mapping = {
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.gif': 'image/gif',
+        '.bmp': 'image/bmp'
+    }
+    
+    media_type = media_type_mapping.get(file_extension, 'application/octet-stream')
+    
+    return FileResponse(
+        path=signature_path,
+        media_type=media_type
+    )
 
 # === ENDPOINTS DE ROLES ===
 

@@ -26,6 +26,7 @@ class TipoDato(str, Enum):
     NUMBER = "NUMBER"
     BOOLEAN = "BOOLEAN"
     JSON = "JSON"
+    TIME = "TIME"
 
 
 class EstadoGestion(str, Enum):
