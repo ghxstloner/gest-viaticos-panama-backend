@@ -11,6 +11,7 @@ from ..models.enums import TipoMision, TipoFlujo, TipoAccion, EstadoGestion, Tip
 # ✅ Solo importar para type checking, evita referencias circulares
 if TYPE_CHECKING:
     from .user import Rol, Usuario
+    from .notificacion import Notificacion
 
 
 class EstadoFlujo(Base):
@@ -107,6 +108,7 @@ class Mision(Base, TimestampMixin):
     subsanaciones: Mapped[List["Subsanacion"]] = relationship("Subsanacion", back_populates="mision", cascade="all, delete-orphan")
     partidas_presupuestarias: Mapped[List["MisionPartidaPresupuestaria"]] = relationship("MisionPartidaPresupuestaria", back_populates="mision", cascade="all, delete-orphan")
     firmas_electronicas: Mapped[List["FirmaElectronica"]] = relationship("FirmaElectronica", back_populates="mision", cascade="all, delete-orphan")
+    notificaciones: Mapped[List["Notificacion"]] = relationship("Notificacion", back_populates="mision", cascade="all, delete-orphan")
 
     # Propiedad computed para compatibilidad (si tienes un campo beneficiario_nombre en algún lugar)
     @property
@@ -198,7 +200,7 @@ class HistorialFlujo(Base):
 
     id_historial: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     id_mision: Mapped[int] = mapped_column(Integer, ForeignKey("misiones.id_mision"), nullable=False)
-    id_usuario_accion: Mapped[int] = mapped_column(Integer, ForeignKey("usuarios.id_usuario"), nullable=False)
+    id_usuario_accion: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("usuarios.id_usuario"), nullable=True)
     id_estado_anterior: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("estados_flujo.id_estado_flujo"), nullable=True)
     id_estado_nuevo: Mapped[int] = mapped_column(Integer, ForeignKey("estados_flujo.id_estado_flujo"), nullable=False)
     tipo_accion: Mapped[TipoAccion] = mapped_column(String(20), nullable=False)     

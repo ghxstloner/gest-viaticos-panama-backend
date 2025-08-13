@@ -594,7 +594,7 @@ class UserService:
                     p.ficha as numero_trabajador,
                     n1.descrip as vicepresidencia,
                     d.Descripcion as departamento,
-                    -- ✅ CORRECCIÓN: JOIN por cédula, no por personal_id
+                    -- ✅ Nueva lógica de jefe inmediato por tabla departamento_aprobadores_maestros (orden 1)
                     jefe.apenom as jefe_inmediato,
                     -- ✅ CORRECCIÓN: Comparar como string
                     CASE 
@@ -613,8 +613,10 @@ class UserService:
                 FROM aitsa_rrhh.nompersonal p
                 LEFT JOIN aitsa_rrhh.nomnivel1 n1 ON p.codnivel1 = n1.codorg
                 LEFT JOIN aitsa_rrhh.departamento d ON p.IdDepartamento = d.IdDepartamento
-                -- ✅ CORRECCIÓN: JOIN correcto para jefe
-                LEFT JOIN aitsa_rrhh.nompersonal jefe ON d.IdJefe = jefe.cedula
+                -- ✅ Nueva forma de jefe inmediato
+                LEFT JOIN aitsa_rrhh.departamento_aprobadores_maestros dam 
+                       ON dam.id_departamento = d.IdDepartamento AND dam.orden_aprobador = 1
+                LEFT JOIN aitsa_rrhh.nompersonal jefe ON dam.cedula_aprobador = jefe.cedula
                 LEFT JOIN aitsa_rrhh.nomfuncion f ON p.nomfuncion_id = f.nomfuncion_id + 0
                 LEFT JOIN aitsa_rrhh.jornadas j ON p.cod_jor = j.cod_jor AND j.activo = 1
                 LEFT JOIN aitsa_rrhh.turnos t ON p.turno_id = t.id
@@ -645,3 +647,4 @@ class UserService:
         except Exception as e:
             print(f"Error getting employee info: {e}")
             return None
+

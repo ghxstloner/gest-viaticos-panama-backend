@@ -67,6 +67,7 @@ class Usuario(UsuarioBase):
     model_config = ConfigDict(from_attributes=True)
     
     id_usuario: int
+    id_departamento: Optional[int] = None
     ultimo_acceso: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
@@ -95,3 +96,4 @@ class EmpleadoInfo(BaseModel):
     titulo_puesto: Optional[str] = None
     horario_trabajo: Optional[str] = None
     turno: Optional[str] = None
+

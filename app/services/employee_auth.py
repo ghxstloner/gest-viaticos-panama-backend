@@ -46,12 +46,13 @@ class EmployeeAuthService:
             return None
     
     def check_if_department_head(self, cedula: str) -> bool:
-        """Verifica si el empleado es jefe de algún departamento"""
+        """Verifica si el empleado es jefe inmediato (orden_aprobador = 1) en algún departamento"""
         try:
             query = text("""
                 SELECT COUNT(*) as count
-                FROM aitsa_rrhh.departamento 
-                WHERE IdJefe = :cedula
+                FROM aitsa_rrhh.departamento_aprobadores_maestros dam
+                WHERE dam.cedula_aprobador = :cedula
+                  AND dam.orden_aprobador = 1
             """)
             result = self.db.execute(query, {"cedula": cedula})
             count = result.fetchone()
@@ -61,12 +62,15 @@ class EmployeeAuthService:
             return False
     
     def get_managed_departments(self, cedula: str) -> list:
-        """Obtiene los departamentos que maneja un jefe"""
+        """Obtiene los departamentos donde el empleado es jefe inmediato (orden_aprobador = 1)"""
         try:
             query = text("""
-                SELECT IdDepartamento, Descripcion
-                FROM aitsa_rrhh.departamento 
-                WHERE IdJefe = :cedula
+                SELECT d.IdDepartamento, d.Descripcion
+                FROM aitsa_rrhh.departamento d
+                JOIN aitsa_rrhh.departamento_aprobadores_maestros dam
+                  ON dam.id_departamento = d.IdDepartamento
+                 AND dam.orden_aprobador = 1
+                WHERE dam.cedula_aprobador = :cedula
             """)
             result = self.db.execute(query, {"cedula": cedula})
             return [{"id": row.IdDepartamento, "descripcion": row.Descripcion} for row in result.fetchall()]

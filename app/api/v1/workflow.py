@@ -1,16 +1,17 @@
 # app/api/v1/workflow.py
 
 from typing import List, Dict, Any, Optional, Union
-from datetime import date
+from datetime import date, datetime
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Query, Body
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import text
+import logging
 
 from ...core.database import get_db_financiero, get_db_rrhh
 from ...core.exceptions import WorkflowException, BusinessException, PermissionException
 from ...api.deps import get_current_user, get_current_user_universal, get_current_employee
 from ...models.user import Usuario
-from ...models.mission import EstadoFlujo, TransicionFlujo, HistorialFlujo
+from ...models.mission import EstadoFlujo, TransicionFlujo, HistorialFlujo, Mision
 from ...schemas.workflow import *
 from ...services.workflow_service import WorkflowService
 from ...api.v1.missions import get_beneficiary_names
@@ -19,6 +20,16 @@ from ...schemas.workflow import PartidaPresupuestariaBase, PartidaPresupuestaria
 from ...api.deps import get_current_user
 from ...models.user import Usuario
 from ...schemas.workflow import PartidaPresupuestariaCatalogoCreate, PartidaPresupuestariaResponse
+
+# Configurar logger
+logger = logging.getLogger(__name__)
+from ...schemas.workflow import (
+    AvailableActionsResponse, WorkflowTransitionResponse, WorkflowActionBase,
+    JefeApprovalRequest, JefeRejectionRequest, JefeReturnRequest, JefeDirectApprovalRequest,
+    TesoreriaApprovalRequest, PresupuestoActionRequest, ContabilidadApprovalRequest,
+    FinanzasApprovalRequest, CGRApprovalRequest, PaymentProcessRequest,
+    DevolverRequest, WorkflowStateInfo, UserParticipationsResponse
+)
 
 router = APIRouter(prefix="/workflow", tags=["Workflow Management"])
 
@@ -350,7 +361,8 @@ async def jefe_return_for_correction(
         mision.id_estado_flujo = nuevo_estado_id
         
         # Crear historial
-        user_id = current_user.id_usuario if hasattr(current_user, 'id_usuario') else 1
+        # Para empleados (dict) dejar NULL en id_usuario_accion y registrar la cédula en datos_adicionales
+        user_id = current_user.id_usuario if hasattr(current_user, 'id_usuario') else None
         user_name = current_user.login_username if hasattr(current_user, 'login_username') else current_user.get('apenom', 'Usuario')
         
         historial = HistorialFlujo(
@@ -372,6 +384,175 @@ async def jefe_return_for_correction(
         
         db.add(historial)
         db.commit()
+        
+        # Enviar notificación por email (asíncrono)
+        try:
+            import asyncio
+            from app.api.v1.missions import get_beneficiary_names
+            
+            # Preparar datos para la notificación
+            data = {
+                'numero_solicitud': mision.numero_solicitud,
+                'tipo': mision.tipo_mision.value,
+                'solicitante': get_beneficiary_names(workflow_service.db_rrhh, [mision.beneficiario_personal_id]).get(mision.beneficiario_personal_id, 'N/A'),
+                'fecha': mision.fecha_salida.strftime('%d/%m/%Y') if mision.fecha_salida else 'N/A',
+                'monto': f"${mision.monto_total_calculado:,.2f}",
+                'objetivo': mision.objetivo_mision or 'N/A'
+            }
+            
+            print(f"DEBUG EMAIL: Enviando notificación de devolución para misión {mission_id}")
+            print(f"DEBUG EMAIL: nuevo_estado_nombre={nuevo_estado_nombre}")
+            print(f"DEBUG EMAIL: user_name={user_name}")
+            
+            # Enviar notificación de devolución
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # Si ya hay un loop corriendo, crear una tarea
+                    asyncio.create_task(
+                        workflow_service._email_service.send_return_notification(
+                            mission_id=mision.id_mision,
+                            return_state=nuevo_estado_nombre,
+                            returned_by=user_name,
+                            observaciones=request_data.observacion,
+                            data=data,
+                            db_rrhh=workflow_service.db_rrhh
+                        )
+                    )
+                else:
+                    # Si no hay loop corriendo, ejecutar directamente
+                    loop.run_until_complete(
+                        workflow_service._email_service.send_return_notification(
+                            mission_id=mision.id_mision,
+                            return_state=nuevo_estado_nombre,
+                            returned_by=user_name,
+                            observaciones=request_data.observacion,
+                            data=data,
+                            db_rrhh=workflow_service.db_rrhh
+                        )
+                    )
+            except Exception as e:
+                print(f"DEBUG EMAIL ERROR en asyncio: {str(e)}")
+                # Fallback: intentar ejecutar de forma síncrona
+                try:
+                    import asyncio
+                    asyncio.run(
+                        workflow_service._email_service.send_return_notification(
+                            mission_id=mision.id_mision,
+                            return_state=nuevo_estado_nombre,
+                            returned_by=user_name,
+                            observaciones=request_data.observacion,
+                            data=data,
+                            db_rrhh=workflow_service.db_rrhh
+                        )
+                    )
+                except Exception as e2:
+                    print(f"DEBUG EMAIL ERROR en fallback: {str(e2)}")
+            
+            print(f"DEBUG EMAIL: Tarea de notificación de devolución creada exitosamente")
+            
+        except Exception as e:
+            logger.error(f"Error enviando notificación de devolución: {str(e)}")
+            print(f"DEBUG EMAIL ERROR: {str(e)}")
+        
+        # Crear notificaciones según el tipo de devolución
+        try:
+            print(f"DEBUG NOTIFICATION: Creando notificaciones de devolución desde endpoint jefe/devolver")
+            print(f"DEBUG NOTIFICATION: nuevo_estado_nombre={nuevo_estado_nombre}")
+            
+            from ...schemas.notification import NotificacionCreate
+            
+            # Determinar el tipo de solicitud para personalizar el mensaje
+            tipo_solicitud = mision.tipo_mision.value if hasattr(mision.tipo_mision, 'value') else str(mision.tipo_mision)
+            if tipo_solicitud == 'VIATICOS':
+                tipo_descripcion = "Viáticos"
+            elif tipo_solicitud == 'CAJA_MENUDA':
+                tipo_descripcion = "Caja Menuda"
+            else:
+                tipo_descripcion = tipo_solicitud
+            
+            if nuevo_estado_nombre == "DEVUELTO_CORRECCION":
+                # Para DEVUELTO_CORRECCION: notificación para el solicitante
+                print(f"DEBUG NOTIFICATION: Creando notificación para solicitante (DEVUELTO_CORRECCION)")
+                titulo = f"Solicitud de {tipo_descripcion} Devuelta - {mision.numero_solicitud}"
+                descripcion = f"Solicitud de {tipo_descripcion} {mision.numero_solicitud} devuelta para corrección por {user_name}"
+                
+                notification_data = NotificacionCreate(
+                    titulo=titulo,
+                    descripcion=descripcion,
+                    personal_id=mision.beneficiario_personal_id,
+                    id_mision=mision.id_mision,
+                    visto=False
+                )
+                
+                workflow_service._notification_service.create_notification(notification_data)
+                print(f"DEBUG NOTIFICATION: Notificación creada para solicitante")
+                
+            elif nuevo_estado_nombre == "DEVUELTO_CORRECCION_JEFE":
+                # Para DEVUELTO_CORRECCION_JEFE: notificación para el jefe inmediato
+                print(f"DEBUG NOTIFICATION: Creando notificación para jefe inmediato (DEVUELTO_CORRECCION_JEFE)")
+                print(f"DEBUG NOTIFICATION: beneficiario_personal_id={mision.beneficiario_personal_id}")
+                
+                # Obtener el jefe inmediato del departamento del solicitante
+                jefe_personal_id = workflow_service._get_jefe_inmediato_personal_id(mision.beneficiario_personal_id)
+                print(f"DEBUG NOTIFICATION: jefe_personal_id encontrado={jefe_personal_id}")
+                
+                if jefe_personal_id:
+                    titulo = f"Solicitud de {tipo_descripcion} Devuelta - {mision.numero_solicitud}"
+                    descripcion = f"Solicitud de {tipo_descripcion} {mision.numero_solicitud} devuelta para corrección por {user_name}"
+                    
+                    notification_data = NotificacionCreate(
+                        titulo=titulo,
+                        descripcion=descripcion,
+                        personal_id=jefe_personal_id,
+                        id_mision=mision.id_mision,
+                        visto=False
+                    )
+                    
+                    try:
+                        workflow_service._notification_service.create_notification(notification_data)
+                        print(f"DEBUG NOTIFICATION: Notificación creada exitosamente para jefe inmediato (personal_id={jefe_personal_id})")
+                    except Exception as e:
+                        print(f"DEBUG NOTIFICATION ERROR: Error creando notificación para jefe: {str(e)}")
+                else:
+                    print(f"DEBUG NOTIFICATION: No se encontró jefe inmediato para personal_id={mision.beneficiario_personal_id}")
+                    print(f"DEBUG NOTIFICATION: Verificar si el empleado tiene jefe asignado en departamento_aprobadores_maestros")
+                    
+            else:
+                # Para otros estados de devolución: notificaciones para todos los usuarios del departamento anterior
+                print(f"DEBUG NOTIFICATION: Creando notificaciones para departamento anterior ({nuevo_estado_nombre})")
+                
+                # Obtener el departamento anterior basado en el estado actual
+                departamento_anterior_id = workflow_service._get_previous_department_id(estado_anterior)
+                
+                if departamento_anterior_id:
+                    titulo = f"Solicitud de {tipo_descripcion} Devuelta - {mision.numero_solicitud}"
+                    descripcion = f"Solicitud de {tipo_descripcion} {mision.numero_solicitud} devuelta para corrección por {user_name}"
+                    
+                    # Obtener personal_ids de usuarios del departamento anterior
+                    department_personal_ids = workflow_service._notification_service.get_department_users_personal_ids(departamento_anterior_id)
+                    print(f"DEBUG NOTIFICATION: Usuarios en departamento anterior {departamento_anterior_id}: {department_personal_ids}")
+                    
+                    # Crear notificaciones para cada usuario del departamento anterior
+                    for personal_id in department_personal_ids:
+                        notification_data = NotificacionCreate(
+                            titulo=titulo,
+                            descripcion=descripcion,
+                            personal_id=personal_id,
+                            id_mision=mision.id_mision,
+                            visto=False
+                        )
+                        
+                        workflow_service._notification_service.create_notification(notification_data)
+                        print(f"DEBUG NOTIFICATION: Notificación creada para usuario {personal_id} del departamento anterior")
+                    
+                    print(f"DEBUG NOTIFICATION: {len(department_personal_ids)} notificaciones creadas para departamento anterior (id={departamento_anterior_id})")
+                else:
+                    print(f"DEBUG NOTIFICATION: No se encontró departamento anterior para estado={estado_anterior}")
+            
+        except Exception as e:
+            logger.error(f"Error creando notificaciones de devolución: {str(e)}")
+            print(f"DEBUG NOTIFICATION ERROR: {str(e)}")
         
         return WorkflowTransitionResponse(
             success=True,
@@ -441,7 +622,8 @@ async def jefe_approve_direct_payment(
         mision.id_estado_flujo = 6  # APROBADO_PARA_PAGO
         
         # Crear historial
-        user_id = current_user.id_usuario if isinstance(current_user, Usuario) else 1
+        # Para empleados (dict) dejar NULL en id_usuario_accion y registrar la cédula en datos_adicionales
+        user_id = current_user.id_usuario if isinstance(current_user, Usuario) else None
         user_name = current_user.login_username if isinstance(current_user, Usuario) else current_user.get('apenom', 'Usuario')
         
         historial = HistorialFlujo(
@@ -915,6 +1097,65 @@ async def get_next_possible_states(
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
+@router.get("/user-participations")
+async def get_user_participations(
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
+    search: Optional[str] = Query(None),
+    estado: Optional[str] = Query(None, description="Filtrar por estado de la misión (PENDIENTE_JEFE, APROBADO_PARA_PAGO, etc.)"),
+    tipo_mision: Optional[str] = Query(None, description="Filtrar por tipo de misión"),
+    fecha_desde: Optional[str] = Query(None, description="Filtrar desde esta fecha (YYYY-MM-DD)"),
+    fecha_hasta: Optional[str] = Query(None, description="Filtrar hasta esta fecha (YYYY-MM-DD)"),
+    workflow_service: WorkflowService = Depends(get_workflow_service),
+    current_user = Depends(get_current_user_universal)
+):
+    """
+    Obtiene todas las solicitudes en las que ha participado un usuario
+    (aprobado, rechazado, devuelto, etc.) - agrupadas por misión para evitar duplicados
+    """
+    try:
+        if not current_user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Usuario no autenticado"
+            )
+
+        filters = {
+            "page": page,
+            "size": size,
+            "search": search,
+            "estado": estado,
+            "tipo_mision": tipo_mision,
+            "fecha_desde": fecha_desde,
+            "fecha_hasta": fecha_hasta
+        }
+
+        result = workflow_service.get_user_participations(current_user, filters)
+        
+        # Obtener nombres de beneficiarios
+        personal_ids = [m.beneficiario_personal_id for m in result['items'] if getattr(m, 'beneficiario_personal_id', None)]
+        beneficiary_names = get_beneficiary_names(workflow_service.db_rrhh, personal_ids)
+        missions_response = []
+        for m in result['items']:
+            if hasattr(m, 'model_dump'):
+                m_dict = m.model_dump()
+            elif hasattr(m, 'dict'):
+                m_dict = m.dict()
+            else:
+                m_dict = vars(m)
+            m_dict['beneficiario_nombre'] = beneficiary_names.get(getattr(m, 'beneficiario_personal_id', None), "No encontrado")
+            missions_response.append(m_dict)
+        result['items'] = missions_response
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"🔍 ERROR en user-participations: {str(e)}")
+        import traceback
+        print(f"🔍 ERROR traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
 # ===============================================
 # ENDPOINTS DE INFORMACIÓN DEL SISTEMA
 # ===============================================
@@ -1049,6 +1290,49 @@ async def debug_user_permissions_complete(
                 for attr in dir(current_user) 
                 if not attr.startswith('_') and hasattr(current_user, attr)
             }
+        }
+        
+    except Exception as e:
+        import traceback
+        return {
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
+
+@router.get("/debug/mission/{mission_id}/state")
+async def debug_mission_state(
+    mission_id: int,
+    workflow_service: WorkflowService = Depends(get_workflow_service),
+    current_user = Depends(get_current_user_universal)
+):
+    """
+    Debug para verificar el estado de una misión específica.
+    """
+    try:
+        if not current_user:
+            return {"error": "No user authenticated"}
+        
+        # Obtener la misión sin validaciones de permisos para debug
+        mision = workflow_service.db.query(Mision).options(
+            joinedload(Mision.estado_flujo)
+        ).filter(Mision.id_mision == mission_id).first()
+        
+        if not mision:
+            return {"error": f"Misión {mission_id} no encontrada"}
+        
+        return {
+            "mission_id": mission_id,
+            "id_estado_flujo": mision.id_estado_flujo,
+            "estado_flujo_loaded": mision.estado_flujo is not None,
+            "estado_flujo_nombre": mision.estado_flujo.nombre_estado if mision.estado_flujo else None,
+            "estado_flujo_descripcion": mision.estado_flujo.descripcion if mision.estado_flujo else None,
+            "tipo_mision": mision.tipo_mision.value if mision.tipo_mision else None,
+            "numero_solicitud": mision.numero_solicitud,
+            "beneficiario_personal_id": mision.beneficiario_personal_id,
+            "monto_total_calculado": float(mision.monto_total_calculado) if mision.monto_total_calculado else None,
+            "created_at": mision.created_at.isoformat() if mision.created_at else None,
+            "available_states_cache": list(workflow_service._states_cache.keys()),
+            "states_cache_count": len(workflow_service._states_cache)
         }
         
     except Exception as e:

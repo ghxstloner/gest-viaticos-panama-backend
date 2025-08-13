@@ -2,6 +2,7 @@ from .base import Base, TimestampMixin
 from .user import Usuario, Rol
 from .configuration import ConfiguracionGeneral, ConfiguracionSistema, ConfiguracionNotificacion
 from .mission import Mision
+from .notificacion import Notificacion
 
 __all__ = [
     "Base",
@@ -11,5 +12,6 @@ __all__ = [
     "ConfiguracionGeneral",
     "ConfiguracionSistema", 
     "ConfiguracionNotificacion",
-    "Mision"
+    "Mision",
+    "Notificacion"
 ]

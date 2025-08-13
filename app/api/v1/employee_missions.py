@@ -1,6 +1,7 @@
 from typing import List, Optional
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+import json
 
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
@@ -501,53 +502,72 @@ async def create_travel_expenses(
         # Registrar en historial
         db_financiero.execute(text("""
             INSERT INTO historial_flujo 
-            (id_mision, id_usuario_accion, id_estado_nuevo, tipo_accion, comentarios, ip_usuario) 
-            VALUES (:id_mision, :id_usuario, :estado, :accion, :comentario, :ip)
+            (id_mision, id_usuario_accion, id_estado_nuevo, tipo_accion, comentarios, ip_usuario, datos_adicionales) 
+            VALUES (:id_mision, :id_usuario, :estado, :accion, :comentario, :ip, :datos_adicionales)
         """), {
             "id_mision": mision.id_mision,
-            "id_usuario": id_usuario,
+            "id_usuario": None,  # NULL para empleados externos al módulo financiero
             "estado": 11,
             "accion": "CREAR",
             "comentario": f"Solicitud de viáticos creada desde portal de empleados por {cedula}",
-            "ip": client_ip
+            "ip": client_ip,
+            "datos_adicionales": json.dumps({
+                "usuario_cedula": cedula,
+                "usuario_nombre": current_employee.get('apenom', 'Empleado'),
+                "origen": "portal_empleados"
+            })
         })
         
         db_financiero.commit()
         
-        # Enviar email de confirmación
+        # Crear notificación en la base de datos para el jefe inmediato
+        try:
+            from app.services.notifaction_service import NotificationService
+            notification_service = NotificationService(db_financiero)
+            
+            # Obtener el jefe inmediato del empleado
+            jefe_personal_id = get_jefe_inmediato_personal_id(personal_id, db_rrhh)
+            
+            if jefe_personal_id:
+                print(f"🔔 Creando notificación para jefe {jefe_personal_id}")
+                notification = notification_service.create_mission_created_notification(
+                    mission_id=mision.id_mision,
+                    jefe_personal_id=jefe_personal_id,
+                    numero_solicitud=numero_solicitud
+                )
+                print(f"✅ Notificación creada exitosamente: {notification.notificacion_id}")
+            else:
+                print("⚠️ No se pudo obtener el jefe inmediato, no se crea notificación")
+        except Exception as e:
+            print(f"❌ Error creating notification: {str(e)}")
+            import traceback
+            traceback.print_exc()
+        
+        # Enviar notificación al jefe inmediato
         try:
             from app.services.email_service import EmailService
             email_service = EmailService(db_financiero)
             
-            # Obtener email del solicitante
-            solicitante_email = email_service.get_solicitante_email(mision.id_mision, db_rrhh)
+            # Preparar datos para el email
+            email_data = {
+                'numero_solicitud': numero_solicitud,
+                'tipo': 'Viáticos',
+                'solicitante': current_employee.get('apenom', 'Empleado'),
+                'departamento': 'Departamento del Solicitante',  # TODO: Obtener nombre del departamento
+                'fecha': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'monto': f"${float(monto_total):,.2f}",
+                'objetivo': request.objetivo
+            }
             
-            if solicitante_email:
-                # Crear datos para el email
-                email_data = {
-                    'numero_solicitud': numero_solicitud,
-                    'tipo': 'Viáticos',
-                    'fecha': datetime.now().strftime('%d/%m/%Y'),
-                    'destino': request.destino,
-                    'monto': f"${float(monto_total):,.2f}",
-                    'estado': 'PENDIENTE_JEFE'
-                }
-                
-                # Crear HTML del email
-                html_body = email_service.create_new_request_email_html(email_data)
-                
-                # Enviar email en background
-                import asyncio
-                asyncio.create_task(email_service.send_email(
-                    to_emails=[solicitante_email],
-                    subject=f"Nueva Solicitud Creada - {numero_solicitud}",
-                    body="Su solicitud ha sido creada exitosamente",
-                    html_body=html_body
-                ))
+            # Enviar notificación al jefe inmediato en background
+            import asyncio
+            asyncio.create_task(email_service.send_new_request_notification(
+                mision.id_mision, email_data, db_rrhh
+            ))
                 
         except Exception as e:
             # Log del error pero no fallar la operación principal
-            print(f"Error enviando email de confirmación: {str(e)}")
+            print(f"Error enviando notificación al jefe inmediato: {str(e)}")
         
         return {
             "success": True,
@@ -671,53 +691,49 @@ async def create_petty_cash(
         # Registrar en historial
         db_financiero.execute(text("""
             INSERT INTO historial_flujo 
-            (id_mision, id_usuario_accion, id_estado_nuevo, tipo_accion, comentarios, ip_usuario) 
-            VALUES (:id_mision, :id_usuario, :estado, :accion, :comentario, :ip)
+            (id_mision, id_usuario_accion, id_estado_nuevo, tipo_accion, comentarios, ip_usuario, datos_adicionales) 
+            VALUES (:id_mision, :id_usuario, :estado, :accion, :comentario, :ip, :datos_adicionales)
         """), {
             "id_mision": mision.id_mision,
-            "id_usuario": id_usuario,
+            "id_usuario": None,  # NULL para empleados externos al módulo financiero
             "estado": 11,
             "accion": "CREAR",
             "comentario": f"Solicitud de caja menuda creada desde portal de empleados por {cedula}",
-            "ip": client_ip
+            "ip": client_ip,
+            "datos_adicionales": json.dumps({
+                "usuario_cedula": cedula,
+                "usuario_nombre": current_employee.get('apenom', 'Empleado'),
+                "origen": "portal_empleados"
+            })
         })
         
         db_financiero.commit()
         
-        # Enviar email de confirmación
+        # Enviar notificación al jefe inmediato
         try:
             from app.services.email_service import EmailService
             email_service = EmailService(db_financiero)
             
-            # Obtener email del solicitante
-            solicitante_email = email_service.get_solicitante_email(mision.id_mision, db_rrhh)
+            # Preparar datos para el email
+            email_data = {
+                'numero_solicitud': numero_solicitud,
+                'tipo': 'Caja Menuda',
+                'solicitante': current_employee.get('apenom', 'Empleado'),
+                'departamento': 'Departamento del Solicitante',  # TODO: Obtener nombre del departamento
+                'fecha': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'monto': f"${float(monto_total):,.2f}",
+                'objetivo': request.trabajo_a_realizar
+            }
             
-            if solicitante_email:
-                # Crear datos para el email
-                email_data = {
-                    'numero_solicitud': numero_solicitud,
-                    'tipo': 'Caja Menuda',
-                    'fecha': datetime.now().strftime('%d/%m/%Y'),
-                    'destino': destino_descripcion,
-                    'monto': f"${float(monto_total):,.2f}",
-                    'estado': 'PENDIENTE_JEFE'
-                }
-                
-                # Crear HTML del email
-                html_body = email_service.create_new_request_email_html(email_data)
-                
-                # Enviar email en background
-                import asyncio
-                asyncio.create_task(email_service.send_email(
-                    to_emails=[solicitante_email],
-                    subject=f"Nueva Solicitud Creada - {numero_solicitud}",
-                    body="Su solicitud ha sido creada exitosamente",
-                    html_body=html_body
-                ))
+            # Enviar notificación al jefe inmediato en background
+            import asyncio
+            asyncio.create_task(email_service.send_new_request_notification(
+                mision.id_mision, email_data, db_rrhh
+            ))
                 
         except Exception as e:
             # Log del error pero no fallar la operación principal
-            print(f"Error enviando email de confirmación: {str(e)}")
+            print(f"Error enviando notificación al jefe inmediato: {str(e)}")
         
         return {
             "success": True,
@@ -1082,16 +1098,21 @@ async def update_travel_expenses(
         # Registrar en historial
         db_financiero.execute(text("""
             INSERT INTO historial_flujo 
-            (id_mision, id_usuario_accion, id_estado_anterior, id_estado_nuevo, tipo_accion, comentarios, ip_usuario) 
-            VALUES (:id_mision, :id_usuario, :estado_anterior, :estado_nuevo, :accion, :comentario, :ip)
+            (id_mision, id_usuario_accion, id_estado_anterior, id_estado_nuevo, tipo_accion, comentarios, ip_usuario, datos_adicionales) 
+            VALUES (:id_mision, :id_usuario, :estado_anterior, :estado_nuevo, :accion, :comentario, :ip, :datos_adicionales)
         """), {
             "id_mision": mission_id,
-            "id_usuario": id_usuario,
+            "id_usuario": None,  # NULL para empleados externos al módulo financiero
             "estado_anterior": mision.id_estado_flujo,
             "estado_nuevo": mision.id_estado_flujo,
             "accion": "ACTUALIZAR",
             "comentario": f"Solicitud de viáticos actualizada desde portal de empleados por {cedula}",
-            "ip": client_ip
+            "ip": client_ip,
+            "datos_adicionales": json.dumps({
+                "usuario_cedula": cedula,
+                "usuario_nombre": current_employee.get('apenom', 'Empleado'),
+                "origen": "portal_empleados"
+            })
         })
         
         db_financiero.commit()
@@ -1224,16 +1245,21 @@ async def update_petty_cash(
         # ✅ REGISTRAR EN HISTORIAL CON CAMBIO DE ESTADO
         db_financiero.execute(text("""
             INSERT INTO historial_flujo 
-            (id_mision, id_usuario_accion, id_estado_anterior, id_estado_nuevo, tipo_accion, comentarios, ip_usuario) 
-            VALUES (:id_mision, :id_usuario, :estado_anterior, :estado_nuevo, :accion, :comentario, :ip)
+            (id_mision, id_usuario_accion, id_estado_anterior, id_estado_nuevo, tipo_accion, comentarios, ip_usuario, datos_adicionales) 
+            VALUES (:id_mision, :id_usuario, :estado_anterior, :estado_nuevo, :accion, :comentario, :ip, :datos_adicionales)
         """), {
             "id_mision": mission_id,
-            "id_usuario": id_usuario,
+            "id_usuario": None,  # NULL para empleados externos al módulo financiero
             "estado_anterior": estado_anterior,  # ✅ Estado anterior real
             "estado_nuevo": 11,  # ✅ PENDIENTE_JEFE
             "accion": "ACTUALIZAR",
             "comentario": f"Solicitud de caja menuda actualizada desde portal de empleados por {cedula} - Enviada para aprobación",
-            "ip": client_ip
+            "ip": client_ip,
+            "datos_adicionales": json.dumps({
+                "usuario_cedula": cedula,
+                "usuario_nombre": current_employee.get('apenom', 'Empleado'),
+                "origen": "portal_empleados"
+            })
         })
         
         db_financiero.commit()
@@ -2102,3 +2128,57 @@ async def validate_viaticos_dia(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error validando viáticos por día: {str(e)}"
         )
+
+
+def get_jefe_inmediato_personal_id(beneficiary_personal_id: int, db_rrhh: Session) -> Optional[int]:
+    """
+    Obtiene el personal_id del jefe inmediato del beneficiario
+    
+    Args:
+        beneficiary_personal_id: personal_id del beneficiario/solicitante
+        db_rrhh: Sesión de la base de datos RRHH
+        
+    Returns:
+        int: personal_id del jefe inmediato o None si no se encuentra
+    """
+    try:
+        # Obtener el departamento del empleado
+        dept_query = text("""
+            SELECT IdDepartamento 
+            FROM nompersonal 
+            WHERE personal_id = :personal_id
+        """)
+        
+        dept_result = db_rrhh.execute(dept_query, {"personal_id": beneficiary_personal_id})
+        dept_row = dept_result.fetchone()
+        
+        if not dept_row or not dept_row[0]:
+            print(f"No se encontró departamento para personal_id {beneficiary_personal_id}")
+            return None
+        
+        departamento_id = dept_row[0]
+        print(f"Departamento encontrado: {departamento_id}")
+        
+        # Obtener el jefe inmediato del departamento (orden_aprobador = 1)
+        jefe_query = text("""
+            SELECT np.personal_id, np.apenom
+            FROM nompersonal np
+            JOIN departamento_aprobadores_maestros dam ON dam.cedula_aprobador = np.cedula
+            WHERE dam.id_departamento = :departamento_id
+              AND dam.orden_aprobador = 1
+              AND np.estado != 'De Baja'
+        """)
+        
+        jefe_result = db_rrhh.execute(jefe_query, {"departamento_id": departamento_id})
+        jefe_row = jefe_result.fetchone()
+        
+        if jefe_row and jefe_row[0]:
+            print(f"Jefe inmediato encontrado: {jefe_row[1]} (personal_id: {jefe_row[0]})")
+            return jefe_row[0]
+        
+        print(f"No se encontró jefe inmediato para departamento {departamento_id}")
+        return None
+        
+    except Exception as e:
+        print(f"Error obteniendo jefe inmediato: {str(e)}")
+        return None

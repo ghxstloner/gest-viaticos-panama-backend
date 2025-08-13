@@ -38,6 +38,7 @@ def has_permission(user, permission_code: str) -> bool:
             'REPORT_EXPORT': permissions.get('reportes', {}).get('exportar', False),
             'REPORT_EXPORT_CAJA': permissions.get('reportes', {}).get('exportar.caja', False),  # Permiso específico para caja menuda
             'REPORT_EXPORT_VIATICOS': permissions.get('reportes', {}).get('exportar.viaticos', False),  # Permiso específico para viáticos
+            'REPORT_ALL': permissions.get('reportes', {}).get('exportar.solicitudes', False),  # Permiso específico para reporte de todas las solicitudes
 
         }
         
@@ -702,3 +703,48 @@ async def export_employee_caja_menuda(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error generando el PDF: {str(e)}"
         )
+
+
+@router.get("/solicitudes-completas/excel")
+async def generate_complete_solicitudes_excel(
+    tipo_mision: Optional[str] = Query(None, description="Filtrar por tipo de misión"),
+    estado: Optional[str] = Query(None, description="Filtrar por nombre de estado de flujo"),
+    fecha_desde: Optional[str] = Query(None, description="Filtrar desde esta fecha (YYYY-MM-DD)"),
+    fecha_hasta: Optional[str] = Query(None, description="Filtrar hasta esta fecha (YYYY-MM-DD)"),
+    fecha_salida: Optional[str] = Query(None, description="Filtrar por fecha de salida (YYYY-MM-DD)"),
+    fecha_retorno: Optional[str] = Query(None, description="Filtrar por fecha de retorno (YYYY-MM-DD)"),
+    monto_min: Optional[float] = Query(None, description="Monto mínimo"),
+    monto_max: Optional[float] = Query(None, description="Monto máximo"),
+    db: Session = Depends(get_db_financiero),
+    current_user = Depends(get_current_user_universal)
+):
+    """Generar reporte completo de todas las solicitudes en Excel con filtros"""
+    # Verificar permisos específicos para este reporte
+    if not has_permission(current_user, "REPORT_ALL"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tiene permisos para exportar el reporte de todas las solicitudes"
+        )
+    
+    report_service = ReportService(db, current_user)
+    
+    excel_file = report_service.generate_complete_solicitudes_report(
+        tipo_mision=tipo_mision,
+        estado=estado,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        fecha_salida=fecha_salida,
+        fecha_retorno=fecha_retorno,
+        monto_min=monto_min,
+        monto_max=monto_max
+    )
+    
+    filename = f"reporte_solicitudes_completas_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    
+    return Response(
+        content=excel_file.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}"
+        }
+    )

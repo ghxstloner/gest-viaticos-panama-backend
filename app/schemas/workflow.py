@@ -247,3 +247,12 @@ class DevolverRequest(BaseModel):
 class PartidaPresupuestariaCatalogoCreate(BaseModel):
     codigo_partida: str = Field(..., min_length=1, max_length=100, description="Código de la partida presupuestaria")
     descripcion: str = Field(..., max_length=255, description="Descripción de la partida presupuestaria")
+
+class UserParticipationsResponse(BaseModel):
+    """Schema para lista de participaciones de usuario"""
+    items: List[Dict[str, Any]]
+    total: int
+    page: int
+    size: int
+    pages: int
+    stats: Dict[str, Any]

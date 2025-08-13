@@ -20,9 +20,30 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Upgrade schema."""
-    pass
+    from alembic import op
+    import sqlalchemy as sa
+    try:
+        op.alter_column(
+            'historial_flujo',
+            'id_usuario_accion',
+            existing_type=sa.Integer(),
+            nullable=True
+        )
+    except Exception:
+        # Ignorar si ya es nullable o si la tabla no existe en este entorno
+        pass
 
 
 def downgrade() -> None:
     """Downgrade schema."""
-    pass
+    from alembic import op
+    import sqlalchemy as sa
+    try:
+        op.alter_column(
+            'historial_flujo',
+            'id_usuario_accion',
+            existing_type=sa.Integer(),
+            nullable=False
+        )
+    except Exception:
+        pass

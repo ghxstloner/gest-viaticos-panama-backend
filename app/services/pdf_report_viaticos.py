@@ -117,6 +117,7 @@ class PDFReportViaticosService:
                     'user_id': mission.id_tesoreria,
                     'signature_path': user_signature,
                     'name': user_name or 'Tesorería',
+                    'department_seal_path': self._get_user_department_seal(mission.id_tesoreria),
                     'is_jefe': False
                 }
                 print(f"🔍 _get_required_signatures_for_state - Tesoreria agregada a required_signatures")
@@ -132,6 +133,7 @@ class PDFReportViaticosService:
                     'user_id': mission.id_presupuesto,
                     'signature_path': user_signature,
                     'name': user_name or 'Presupuesto',
+                    'department_seal_path': self._get_user_department_seal(mission.id_presupuesto),
                     'is_jefe': False
                 }
                 print(f"🔍 _get_required_signatures_for_state - Presupuesto agregado a required_signatures")
@@ -147,6 +149,7 @@ class PDFReportViaticosService:
                     'user_id': mission.id_contabilidad,
                     'signature_path': user_signature,
                     'name': user_name or 'Contabilidad',
+                    'department_seal_path': self._get_user_department_seal(mission.id_contabilidad),
                     'is_jefe': False
                 }
                 print(f"🔍 _get_required_signatures_for_state - Contabilidad agregada a required_signatures")
@@ -162,6 +165,7 @@ class PDFReportViaticosService:
                     'user_id': mission.id_finanzas,
                     'signature_path': user_signature,
                     'name': user_name or 'Finanzas',
+                    'department_seal_path': self._get_user_department_seal(mission.id_finanzas),
                     'is_jefe': False
                 }
                 print(f"🔍 _get_required_signatures_for_state - Finanzas agregado a required_signatures")
@@ -230,6 +234,78 @@ class PDFReportViaticosService:
         except Exception as e:
             print(f"Error obteniendo nombre del usuario {user_id}: {e}")
             return None
+
+    def _get_user_department_seal(self, user_id: int) -> Optional[str]:
+        """Obtener ruta del sello del departamento al que pertenece el usuario"""
+        try:
+            from sqlalchemy import text
+            result = self.db.execute(text(
+                """
+                SELECT d.ruta_sello
+                FROM departamentos d
+                JOIN usuarios u ON u.id_departamento = d.id_departamento
+                WHERE u.id_usuario = :user_id AND d.ruta_sello IS NOT NULL
+                """
+            ), {"user_id": user_id})
+            row = result.fetchone()
+            seal_path = row.ruta_sello if row else None
+            print(f"🔍 _get_user_department_seal - User ID: {user_id}, Seal path: {seal_path}")
+            return seal_path
+        except Exception as e:
+            print(f"Error obteniendo sello del departamento del usuario {user_id}: {e}")
+            return None
+
+    def _get_department_seal_by_id(self, department_id: int) -> Optional[str]:
+        """Obtener ruta del sello directamente por ID de departamento"""
+        try:
+            from sqlalchemy import text
+            result = self.db.execute(text(
+                """
+                SELECT ruta_sello
+                FROM departamentos
+                WHERE id_departamento = :department_id AND ruta_sello IS NOT NULL
+                """
+            ), {"department_id": department_id})
+            row = result.fetchone()
+            seal_path = row.ruta_sello if row else None
+            print(f"🔍 _get_department_seal_by_id - Department ID: {department_id}, Seal path: {seal_path}")
+            return seal_path
+        except Exception as e:
+            print(f"Error obteniendo sello del departamento {department_id}: {e}")
+            return None
+
+    def _build_signature_with_seal(self, signature_path: Optional[str], seal_path: Optional[str]):
+        """Construye un elemento que muestra sello y firma lado a lado si existen"""
+        try:
+            if not signature_path and not seal_path:
+                return Paragraph("", self.table_data_style)
+
+            elements_row = []
+            # Sello (cuadrado pequeño)
+            if seal_path and seal_path != "string":
+                elements_row.append(Image(seal_path, width=20*mm, height=20*mm))
+            else:
+                elements_row.append(Paragraph("", self.table_data_style))
+
+            # Firma
+            if signature_path and signature_path != "string":
+                elements_row.append(Image(signature_path, width=40*mm, height=15*mm))
+            else:
+                elements_row.append(Paragraph("", self.table_data_style))
+
+            nested = Table([elements_row], colWidths=[22*mm, 40*mm])
+            nested.setStyle(TableStyle([
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                ('LEFTPADDING', (0, 0), (-1, -1), 0),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+                ('TOPPADDING', (0, 0), (-1, -1), 0),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
+            ]))
+            return nested
+        except Exception as e:
+            print(f"Error construyendo elemento firma+sello: {e}")
+            return Paragraph("", self.table_data_style)
 
     def _get_beneficiary_name(self, personal_id: int) -> str:
         """Obtener nombre del beneficiario"""
@@ -624,11 +700,6 @@ class PDFReportViaticosService:
         # Datos de viáticos
         viaticos_data = viaticos_headers.copy()
 
-        # Calcular cuántas filas necesitamos
-        max_viaticos_completos = len(mission.items_viaticos_completos) if hasattr(mission, 'items_viaticos_completos') and mission.items_viaticos_completos else 0
-        max_viaticos_parciales = len(mission.items_viaticos) if mission.items_viaticos else 0
-        max_filas = max(max_viaticos_completos, max_viaticos_parciales, 6)  # Mínimo 6 filas
-
         # Crear listas de datos para cada sección
         viaticos_completos_data = []
         if hasattr(mission, 'items_viaticos_completos') and mission.items_viaticos_completos:
@@ -653,7 +724,9 @@ class PDFReportViaticosService:
                     f"B/. {total_item:,.2f}"
                 ])
 
-        # Llenar las filas con datos independientes
+        # Llenar las filas con datos reales
+        max_filas = max(len(viaticos_completos_data), len(viaticos_parciales_data))
+        
         for i in range(max_filas):
             row = []
 
@@ -817,19 +890,10 @@ class PDFReportViaticosService:
                 ]
                 transporte_data.append(row)
 
-        # Agregar filas vacías hasta completar al menos 6 filas de datos
+        # No agregar filas vacías - solo mostrar datos reales
         estilo_texto_largo = ParagraphStyle('TextoLargo', parent=self.styles['Normal'], 
                                           fontSize=8, fontName='Helvetica', alignment=TA_CENTER, 
                                           wordWrap='CJK', leading=10)
-        while len(transporte_data) < 11:  # 1 título + 1 header + 7 filas mínimo
-            empty_row = [
-                Paragraph("", self.table_data_style),
-                Paragraph("", self.table_data_style),
-                Paragraph("", estilo_texto_largo),
-                Paragraph("", estilo_texto_largo),
-                Paragraph("", self.table_data_style)
-            ]
-            transporte_data.append(empty_row)
 
         # Agregar fila de total de transporte
         total_transporte_row = [
@@ -952,10 +1016,7 @@ class PDFReportViaticosService:
                 ]
                 exterior_data.append(row)
 
-        # Agregar filas vacías hasta completar al menos 3 filas de datos
-        while len(exterior_data) < 6:  # 1 título + 1 header + 4 filas mínimo
-            empty_row = [Paragraph("", self.table_data_style) for _ in range(8)]
-            exterior_data.append(empty_row)
+        # No agregar filas vacías - solo mostrar datos reales
 
         # Agregar fila de total de misiones al exterior
         total_exterior_row = [
@@ -1032,14 +1093,6 @@ class PDFReportViaticosService:
                     Paragraph(f"B/. {partida.monto:,.2f}", self.table_data_style)
                 ]
                 partidas_data.append(row)
-        else:
-            # Filas vacías por defecto
-            for _ in range(3):
-                row = [
-                    Paragraph("", self.table_data_style),
-                    Paragraph("", self.table_data_style)
-                ]
-                partidas_data.append(row)
         
         # Total
         total_partidas = sum([p.monto for p in mission.partidas_presupuestarias]) if mission.partidas_presupuestarias else mission.monto_total_calculado
@@ -1095,9 +1148,7 @@ class PDFReportViaticosService:
             ]
         ]
         
-        # Agregar filas vacías para la firma
-        for _ in range(5):  # Mismo número de filas que partidas
-            firma_data.append([Paragraph("", self.table_data_style)])
+        # No agregar filas vacías - solo mostrar espacio necesario
         
         firma_table = Table(firma_data, colWidths=[95*mm])
         firma_table.setStyle(TableStyle([
@@ -1147,29 +1198,29 @@ class PDFReportViaticosService:
         try:
             if 'tesoreria' in required_signatures:
                 signature_path = required_signatures['tesoreria'].get('signature_path')
-                if signature_path:
-                    tesoreria_element = Image(signature_path, width=40*mm, height=15*mm)
-                    print(f"🔍 generate_viaticos_transporte_pdf - Tesoreria element creado con firma: {signature_path}")
-                
+                seal_path = required_signatures['tesoreria'].get('department_seal_path')
+                tesoreria_element = self._build_signature_with_seal(signature_path, seal_path)
+                print(f"🔍 generate_viaticos_transporte_pdf - Tesoreria element creado (firma+sello)")
+
             if 'presupuesto' in required_signatures:
                 signature_path = required_signatures['presupuesto'].get('signature_path')
-                if signature_path:
-                    presupuesto_element = Image(signature_path, width=40*mm, height=15*mm)
-                    print(f"🔍 generate_viaticos_transporte_pdf - Presupuesto element creado con firma: {signature_path}")
-                
+                seal_path = required_signatures['presupuesto'].get('department_seal_path')
+                presupuesto_element = self._build_signature_with_seal(signature_path, seal_path)
+                print(f"🔍 generate_viaticos_transporte_pdf - Presupuesto element creado (firma+sello)")
+
             if 'contabilidad' in required_signatures:
                 signature_path = required_signatures['contabilidad'].get('signature_path')
-                if signature_path:
-                    contabilidad_element = Image(signature_path, width=40*mm, height=15*mm)
-                    print(f"🔍 generate_viaticos_transporte_pdf - Contabilidad element creado con firma: {signature_path}")
-                
+                seal_path = required_signatures['contabilidad'].get('department_seal_path')
+                contabilidad_element = self._build_signature_with_seal(signature_path, seal_path)
+                print(f"🔍 generate_viaticos_transporte_pdf - Contabilidad element creado (firma+sello)")
+
             if 'finanzas' in required_signatures:
                 signature_path = required_signatures['finanzas'].get('signature_path')
-                if signature_path:
-                    finanzas_element = Image(signature_path, width=40*mm, height=15*mm)
-                    print(f"🔍 generate_viaticos_transporte_pdf - Finanzas element creado con firma: {signature_path}")
+                seal_path = required_signatures['finanzas'].get('department_seal_path')
+                finanzas_element = self._build_signature_with_seal(signature_path, seal_path)
+                print(f"🔍 generate_viaticos_transporte_pdf - Finanzas element creado (firma+sello)")
         except Exception as e:
-            print(f"❌ Error creando elementos de firma: {e}")
+            print(f"❌ Error creando elementos de firma+sello: {e}")
             import traceback
             traceback.print_exc()
         
@@ -1280,7 +1331,7 @@ class PDFReportViaticosService:
         # DEPARTAMENTOS DE AUTORIZACIÓN
         dept_data = [
             [
-                Paragraph("Nombre y Firma del Director de Administración y/o Finanzas:", 
+                Paragraph("Nombre y Firma del Vicepresidente de Finanzas:", 
                          ParagraphStyle('Left', parent=self.styles['Normal'], alignment=TA_LEFT, fontSize=9)),
                 Paragraph("Nombre y Firma de la Máxima Autoridad:", 
                          ParagraphStyle('Left', parent=self.styles['Normal'], alignment=TA_LEFT, fontSize=9))
@@ -1296,7 +1347,7 @@ class PDFReportViaticosService:
         ]
 
         # Alturas: header + nombre + espacio firma
-        dept_row_heights = [8*mm, 6*mm, 18*mm]  # Total: 32mm
+        dept_row_heights = [8*mm, 6*mm, 22*mm]  # Ajustado para espacio de sello+firma
 
         dept_table = Table(dept_data, colWidths=[95*mm, 95*mm], rowHeights=dept_row_heights)
         dept_table.setStyle(TableStyle([
@@ -1344,15 +1395,25 @@ class PDFReportViaticosService:
         # OFICINA DE FISCALIZACIÓN (CGR) - Siempre mostrar la tabla, pero solo la firma cuando corresponda
         estados_cgr = ['PENDIENTE_REFRENDO_CGR', 'APROBADO_PARA_PAGO', 'PAGADO', 'DEVUELTO_CORRECCION']
         
-        # Obtener firma de CGR si corresponde
-        cgr_signature = None
+        # Obtener sello de CGR (solo sello, sin firma)
+        cgr_department_seal = None
         if mission.estado_flujo.nombre_estado in estados_cgr:
-            # Aquí podrías obtener la firma de CGR si tienes un usuario específico
-            # cgr_signature = self._get_user_signature(self.signature_user_ids.get('cgr'))
-            pass
+            try:
+                cgr_department_seal = self._get_department_seal_by_id(4)  # CGR siempre usa departamento ID 4
+                print(f"🔍 generate_viaticos_transporte_pdf - CGR department seal: {cgr_department_seal}")
+            except Exception as e:
+                print(f"Error obteniendo sello de CGR: {e}")
+                cgr_department_seal = None
+        else:
+            print(f"🔍 generate_viaticos_transporte_pdf - Estado no requiere CGR: {mission.estado_flujo.nombre_estado}")
         
-        # Crear elemento de firma para CGR
-        cgr_element = Image(cgr_signature, width=40*mm, height=15*mm) if cgr_signature else Paragraph("", self.table_data_style)
+        # Crear elemento de sello para CGR (solo sello centrado)
+        if cgr_department_seal and cgr_department_seal != "string":
+            cgr_element = Image(cgr_department_seal, width=25*mm, height=25*mm)  # Sello ajustado al espacio disponible
+            print(f"🔍 generate_viaticos_transporte_pdf - CGR element creado con sello")
+        else:
+            cgr_element = Paragraph("", self.table_data_style)
+            print(f"🔍 generate_viaticos_transporte_pdf - CGR element creado vacío")
         
         fiscalizacion_data = [
             [

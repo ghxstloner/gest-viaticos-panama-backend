@@ -88,6 +88,7 @@ async def create_mission(
     mission_data: MisionCreate,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db_financiero),
+    db_rrhh: Session = Depends(get_db_rrhh),
     current_user: Usuario = Depends(get_current_user)
 ):
     """
@@ -95,7 +96,7 @@ async def create_mission(
     El `tipo_mision` determina qué campos son requeridos.
     """
     try:
-        mission_service = MissionService(db)
+        mission_service = MissionService(db, db_rrhh)
         
         # Si el beneficiario no se especifica, se asume que es el usuario que crea la solicitud.
         if not mission_data.beneficiario_personal_id:
@@ -111,8 +112,32 @@ async def create_mission(
             preparer_id=current_user.id_usuario
         )
         
-        # TODO: Implementar notificaciones en segundo plano
-        # background_tasks.add_task(send_notification, mission.id_mision, "created")
+        # Enviar notificación al jefe inmediato
+        try:
+            from app.services.email_service import EmailService
+            
+            email_service = EmailService(db)
+            
+            # Preparar datos para el email
+            email_data = {
+                'numero_solicitud': mission.numero_solicitud,
+                'tipo': mission.tipo_mision.value if hasattr(mission.tipo_mision, 'value') else str(mission.tipo_mision),
+                'solicitante': current_user.login_username,
+                'departamento': 'Departamento del Solicitante',  # TODO: Obtener nombre del departamento
+                'fecha': mission.created_at.strftime('%Y-%m-%d %H:%M:%S') if mission.created_at else datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'monto': f"${float(mission.monto_total_calculado):,.2f}" if mission.monto_total_calculado else 'N/A',
+                'objetivo': mission.objetivo_mision or 'N/A'
+            }
+            
+            # Enviar notificación al jefe inmediato en background
+            import asyncio
+            asyncio.create_task(email_service.send_new_request_notification(
+                mission.id_mision, email_data, db_rrhh
+            ))
+                
+        except Exception as e:
+            # Log del error pero no fallar la operación principal
+            print(f"Error enviando notificación al jefe inmediato: {str(e)}")
         
         return {
             "success": True,

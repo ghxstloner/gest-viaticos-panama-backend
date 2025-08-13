@@ -24,13 +24,16 @@ from ..core.exceptions import (
     BusinessException, WorkflowException, ValidationException,
     PermissionException, MissionException
 )
+from ..services.notifaction_service import NotificationService
 
 class MissionService:
     """
     Contiene toda la lógica de negocio para la gestión de misiones (viáticos y caja menuda).
     """
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, db_rrhh: Optional[Session] = None):
         self.db = db
+        self.db_rrhh = db_rrhh
+        self._notification_service = NotificationService(db)
 
     def create_mission(self, mission_data: MisionCreate, preparer_id: int) -> Mision:
         """
@@ -46,6 +49,10 @@ class MissionService:
         if not estado_inicial:
             raise BusinessException("Configuración de flujo inválida: No se encontró el estado inicial.")
 
+        # Generar número de solicitud automáticamente
+        from app.api.v1.employee_missions import generate_request_number
+        numero_solicitud = generate_request_number(self.db)
+        
         mision = Mision(
             tipo_mision=mission_data.tipo_mision,
             beneficiario_personal_id=mission_data.beneficiario_personal_id,
@@ -53,7 +60,7 @@ class MissionService:
             objetivo_mision=mission_data.objetivo_mision,
             observaciones_especiales=mission_data.observaciones_especiales,
             id_estado_flujo=estado_inicial.id_estado_flujo,
-            numero_solicitud=mission_data.numero_solicitud,
+            numero_solicitud=numero_solicitud,
             codnivel1_solicitante=mission_data.codnivel1_solicitante,
             destino_mision=mission_data.destino_mision,
             fecha_salida=mission_data.fecha_salida,
@@ -83,7 +90,7 @@ class MissionService:
 
         self._create_history_record(
             mision_id=mision.id_mision,
-            user_id=preparer_id,
+            user_id=None,
             new_state_id=estado_inicial.id_estado_flujo,
             action_type=TipoAccion.CREAR,
             comments="Solicitud creada exitosamente."
@@ -91,6 +98,39 @@ class MissionService:
 
         self.db.commit()
         self.db.refresh(mision)
+        
+        # Crear notificación para el jefe inmediato
+        print(f"🔔 Intentando crear notificación para misión {mision.id_mision}")
+        print(f"🔔 Beneficiario personal_id: {mision.beneficiario_personal_id}")
+        
+        # Verificar que el servicio de notificaciones esté disponible
+        if not hasattr(self, '_notification_service'):
+            print("❌ Servicio de notificaciones no disponible")
+            return mision
+            
+        if not self.db_rrhh:
+            print("⚠️ No hay conexión a RRHH, no se puede crear notificación")
+            return mision
+            
+        try:
+            jefe_personal_id = self._get_jefe_inmediato_personal_id(mision.beneficiario_personal_id)
+            print(f"🔔 Jefe personal_id obtenido: {jefe_personal_id}")
+            
+            if jefe_personal_id:
+                print(f"🔔 Creando notificación para jefe {jefe_personal_id}")
+                notification = self._notification_service.create_mission_created_notification(
+                    mission_id=mision.id_mision,
+                    jefe_personal_id=jefe_personal_id,
+                    numero_solicitud=mision.numero_solicitud
+                )
+                print(f"✅ Notificación creada exitosamente: {notification.notificacion_id}")
+            else:
+                print("⚠️ No se pudo obtener el jefe inmediato, no se crea notificación")
+        except Exception as e:
+            print(f"❌ Error creating notification: {str(e)}")
+            import traceback
+            traceback.print_exc()
+        
         return mision
 
     def get_mission_detail(self, mission_id: int, user: Usuario) -> Dict[str, Any]:
@@ -160,9 +200,18 @@ class MissionService:
             ).params(pid=user.personal_id_rrhh).scalar()
 
             if jefe_cedula:
-                # 2. Obtener los IDs de los departamentos que este jefe maneja
+                # 2. Obtener los IDs de los departamentos donde es jefe inmediato (orden_aprobador = 1)
                 deptos_managed_query = self.db.query(text("IdDepartamento")).from_statement(
-                    text("SELECT IdDepartamento FROM aitsa_rrhh.departamento WHERE IdJefe = :jefe_cedula")
+                    text(
+                        """
+                        SELECT d.IdDepartamento
+                        FROM aitsa_rrhh.departamento d
+                        JOIN aitsa_rrhh.departamento_aprobadores_maestros dam
+                          ON dam.id_departamento = d.IdDepartamento
+                         AND dam.orden_aprobador = 1
+                        WHERE dam.cedula_aprobador = :jefe_cedula
+                        """
+                    )
                 ).params(jefe_cedula=jefe_cedula)
                 deptos_managed_ids = [row[0] for row in deptos_managed_query.all()]
 
@@ -255,13 +304,19 @@ class MissionService:
 
     # --- Métodos Privados Auxiliares ---
 
-    def _create_history_record(self, mision_id: int, user_id: int, new_state_id: int, action_type: TipoAccion,
+    def _create_history_record(self, mision_id: int, user_id: Optional[int], new_state_id: int, action_type: TipoAccion,
                                old_state_id: Optional[int] = None, comments: Optional[str] = None,
                                extra_data: Optional[Dict] = None):
+        # Permitir NULL en id_usuario_accion (por ejemplo, cuando el actor es empleado externo al módulo financiero)
         historial = HistorialFlujo(
-            id_mision=mision_id, id_usuario_accion=user_id, id_estado_anterior=old_state_id,
-            id_estado_nuevo=new_state_id, tipo_accion=action_type, comentarios=comments, 
-            observacion=comments, datos_adicionales=extra_data
+            id_mision=mision_id,
+            id_usuario_accion=user_id,
+            id_estado_anterior=old_state_id,
+            id_estado_nuevo=new_state_id,
+            tipo_accion=action_type,
+            comentarios=comments,
+            observacion=comments,
+            datos_adicionales=extra_data
         )
         self.db.add(historial)
 
@@ -342,3 +397,59 @@ class MissionService:
         except Exception as e:
             print(f"Error crítico al consultar la base de datos de RRHH: {e}")
             raise BusinessException("No se pudo obtener la información del empleado desde RRHH.")
+
+    def _get_jefe_inmediato_personal_id(self, beneficiary_personal_id: int) -> Optional[int]:
+        """
+        Obtiene el personal_id del jefe inmediato del beneficiario
+        
+        Args:
+            beneficiary_personal_id: personal_id del beneficiario/solicitante
+            
+        Returns:
+            int: personal_id del jefe inmediato o None si no se encuentra
+        """
+        try:
+            if not self.db_rrhh:
+                print("No hay conexión a la base de datos RRHH")
+                return None
+                
+            # Obtener el departamento del empleado
+            dept_query = text("""
+                SELECT IdDepartamento 
+                FROM nompersonal 
+                WHERE personal_id = :personal_id
+            """)
+            
+            dept_result = self.db_rrhh.execute(dept_query, {"personal_id": beneficiary_personal_id})
+            dept_row = dept_result.fetchone()
+            
+            if not dept_row or not dept_row[0]:
+                print(f"No se encontró departamento para personal_id {beneficiary_personal_id}")
+                return None
+            
+            departamento_id = dept_row[0]
+            print(f"Departamento encontrado: {departamento_id}")
+            
+            # Obtener el jefe inmediato del departamento (orden_aprobador = 1)
+            jefe_query = text("""
+                SELECT np.personal_id, np.apenom
+                FROM nompersonal np
+                JOIN departamento_aprobadores_maestros dam ON dam.cedula_aprobador = np.cedula
+                WHERE dam.id_departamento = :departamento_id
+                  AND dam.orden_aprobador = 1
+                  AND np.estado != 'De Baja'
+            """)
+            
+            jefe_result = self.db_rrhh.execute(jefe_query, {"departamento_id": departamento_id})
+            jefe_row = jefe_result.fetchone()
+            
+            if jefe_row and jefe_row[0]:
+                print(f"Jefe inmediato encontrado: {jefe_row[1]} (personal_id: {jefe_row[0]})")
+                return jefe_row[0]
+            
+            print(f"No se encontró jefe inmediato para departamento {departamento_id}")
+            return None
+            
+        except Exception as e:
+            print(f"Error obteniendo jefe inmediato: {str(e)}")
+            return None

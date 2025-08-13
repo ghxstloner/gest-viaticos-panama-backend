@@ -434,3 +434,57 @@ class ViaticoDiaValidationResponse(BaseModel):
     tiene_hospedaje: bool
     mensaje: str
     detalles: Optional[Dict[str, Any]] = None
+
+class UserParticipationResponse(BaseModel):
+    """Schema para respuesta de participación de usuario en solicitudes"""
+    id_mision: int
+    numero_solicitud: Optional[str]
+    codnivel2_destino_cm: Optional[int]
+    tipo_mision: TipoMision
+    beneficiario_personal_id: int
+    id_usuario_prepara: Optional[int]
+    categoria_beneficiario: Optional[CategoriaBeneficiario]
+    objetivo_mision: Optional[str]
+    destino_mision: Optional[str]
+    tipo_viaje: Optional[TipoViaje]
+    region_exterior: Optional[str]
+    fecha_salida: Optional[datetime]
+    fecha_retorno: Optional[datetime]
+    transporte_oficial: Optional[bool]
+    monto_total_calculado: Decimal
+    monto_aprobado: Optional[Decimal]
+    requiere_refrendo_cgr: bool
+    numero_gestion_cobro: Optional[str]
+    observaciones_especiales: Optional[str]
+    fecha_limite_presentacion: Optional[date]
+    created_at: datetime
+    updated_at: datetime
+    observacion: Optional[str]
+    beneficiario_nombre: Optional[str]
+    
+    # Campos para tracking de usuarios que aprueban en cada etapa del workflow
+    id_tesoreria: Optional[int]
+    id_presupuesto: Optional[int]
+    id_contabilidad: Optional[int]
+    id_finanzas: Optional[int]
+    id_jefe: Optional[int]
+    
+    # Relaciones
+    estado_flujo: EstadoFlujo
+    items_viaticos: List[ItemViatico] = []
+    items_transporte: List[ItemTransporte] = []
+    partidas_presupuestarias: List[MisionPartidaPresupuestaria] = []
+    items_misiones_exterior: List[ItemMisionExterior] = []
+    items_viaticos_completos: Optional[List[ItemViaticoCompletoSchema]] = []
+    misiones_caja_menuda: List[MisionCajaMenuda] = []
+    
+    model_config = ConfigDict(from_attributes=True)
+
+class UserParticipationsResponse(BaseModel):
+    """Schema para lista de participaciones de usuario"""
+    items: List[UserParticipationResponse]
+    total: int
+    page: int
+    size: int
+    pages: int
+    stats: Dict[str, Any]

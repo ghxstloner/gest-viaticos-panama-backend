@@ -79,11 +79,13 @@ class Usuario(Base, TimestampMixin):
     login_username: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     id_rol: Mapped[int] = mapped_column(Integer, ForeignKey("roles.id_rol"), nullable=False)
+    id_departamento: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("departamentos.id_departamento"), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     ultimo_acceso: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     firma: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
     rol: Mapped["Rol"] = relationship("Rol", back_populates="usuarios")
+    departamento: Mapped[Optional["Department"]] = relationship("Department", back_populates="usuarios")
     
     # Relaciones para otras partes de la aplicación
     historial_flujo: Mapped[List["HistorialFlujo"]] = relationship("HistorialFlujo", back_populates="usuario_accion")

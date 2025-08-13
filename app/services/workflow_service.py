@@ -1,11 +1,14 @@
 # app/services/workflow_service.py
 
+import logging
 from typing import List, Dict, Any, Optional, Tuple, Union
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import text, and_, or_, bindparam
+from sqlalchemy import text, and_, or_, bindparam, func
 from decimal import Decimal
 from datetime import datetime
 from fastapi import HTTPException, status
+
+logger = logging.getLogger(__name__)
 
 from ..models.mission import (
     Mision, EstadoFlujo, TransicionFlujo, HistorialFlujo, 
@@ -19,6 +22,9 @@ from ..core.exceptions import (
     PermissionException
 )
 from ..services.configuration import ConfigurationService
+from ..services.email_service import EmailService
+from ..services.notifaction_service import NotificationService
+from ..schemas.notification import NotificacionCreate
 
 class WorkflowService:
     """
@@ -32,17 +38,106 @@ class WorkflowService:
         self._states_cache: Dict[str, EstadoFlujo] = {}
         self._roles_cache: Dict[str, Rol] = {}
         self._config_service = ConfigurationService(db_financiero)
+        self._email_service = EmailService(db_financiero)
+        self._notification_service = NotificationService(db_financiero)
         self._load_caches()
     
     def _load_caches(self):
         """Cargar estados y roles en caché para mejor performance"""
         # Cargar estados
         estados = self.db.query(EstadoFlujo).all()
-        self._states_cache = {estado.nombre_estado: estado for estado in estados}
+        if not estados:
+            logger.warning("No se encontraron estados de flujo en la base de datos")
+        
+        # Crear cache con múltiples índices: por nombre y por ID
+        self._states_cache = {}
+        for estado in estados:
+            # Índice por nombre
+            self._states_cache[estado.nombre_estado] = estado
+            # Índice por ID
+            self._states_cache[estado.id_estado_flujo] = estado
+        
+        logger.info(f"Cargados {len(estados)} estados de flujo en caché (con índices por nombre e ID)")
         
         # Cargar roles
         roles = self.db.query(Rol).all()
+        if not roles:
+            logger.warning("No se encontraron roles en la base de datos")
         self._roles_cache = {rol.nombre_rol: rol for rol in roles}
+        logger.info(f"Cargados {len(self._roles_cache)} roles en caché")
+        
+        # Debug: mostrar qué estados están en el cache
+        logger.info("Estados en cache:")
+        for key, estado in self._states_cache.items():
+            if isinstance(key, str):  # Solo mostrar los índices por nombre para evitar duplicados
+                logger.info(f"  - {key} (ID: {estado.id_estado_flujo})")
+
+    def _prepare_notification_data(self, mision: Mision) -> Dict[str, Any]:
+        """
+        Prepara los datos para las notificaciones por email
+        
+        Args:
+            mision: Objeto de misión
+            
+        Returns:
+            Dict con los datos preparados para la notificación
+        """
+        try:
+            from app.api.v1.missions import get_beneficiary_names
+            beneficiary_names = get_beneficiary_names(self.db_rrhh, [mision.beneficiario_personal_id])
+            
+            print(f"DEBUG WORKFLOW: numero_solicitud real de la misión: '{mision.numero_solicitud}'")
+            print(f"DEBUG WORKFLOW: id_mision: {mision.id_mision}")
+            print(f"DEBUG WORKFLOW: tipo de numero_solicitud: {type(mision.numero_solicitud)}")
+            
+            return {
+                'numero_solicitud': mision.numero_solicitud,
+                'tipo': mision.tipo_mision.value,
+                'solicitante': beneficiary_names.get(mision.beneficiario_personal_id, 'N/A'),
+                'fecha': mision.fecha_salida.strftime('%d/%m/%Y') if mision.fecha_salida else 'N/A',
+                'monto': f"${mision.monto_total_calculado:,.2f}",
+                'objetivo': mision.objetivo_mision or 'N/A'
+            }
+        except Exception as e:
+            logger.error(f"Error preparando datos de notificación: {str(e)}")
+            return {
+                'numero_solicitud': mision.numero_solicitud,
+                'tipo': mision.tipo_mision.value,
+                'solicitante': 'N/A',
+                'fecha': 'N/A',
+                'monto': 'N/A',
+                'objetivo': 'N/A'
+            }
+
+    def _send_workflow_notification_async(self, mision: Mision, estado_anterior: str, estado_nuevo: str, approved_by: str):
+        """
+        Envía notificación de workflow de forma asíncrona
+        
+        Args:
+            mision: Objeto de misión
+            estado_anterior: Estado anterior
+            estado_nuevo: Estado nuevo
+            approved_by: Nombre del usuario que aprobó
+        """
+        try:
+            import asyncio
+            
+            data = self._prepare_notification_data(mision)
+            
+            # Enviar notificación de workflow
+            asyncio.create_task(
+                self._email_service.send_workflow_notification(
+                    mission_id=mision.id_mision,
+                    current_state=estado_anterior,
+                    next_state=estado_nuevo,
+                    approved_by=approved_by,
+                    data=data,
+                    db_rrhh=self.db_rrhh
+                )
+            )
+            
+        except Exception as e:
+            logger.error(f"Error enviando notificación de workflow: {str(e)}")
     
     def _get_system_configuration(self, clave: str, default_value: Any = None) -> Any:
         """Obtiene una configuración del sistema por clave"""
@@ -207,6 +302,8 @@ class WorkflowService:
         Soporta tanto usuarios financieros como empleados usando sistema de permisos.
         """
         mision = self._get_mission_with_validation(mission_id, user)
+        if not mision.estado_flujo:
+            raise WorkflowException(f"Estado de flujo no disponible para misión {mission_id}")
         estado_actual = mision.estado_flujo.nombre_estado
         
         acciones_disponibles = []
@@ -567,13 +664,21 @@ class WorkflowService:
         """
         Ejecuta una acción específica del workflow.
         """
+        print(f"🔍 DEBUG execute_workflow_action: Iniciando para misión {mission_id}, acción {action}")
+        
         mision = self._get_mission_with_validation(mission_id, user)
+        print(f"🔍 DEBUG execute_workflow_action: Misión obtenida - estado_flujo: {mision.estado_flujo is not None}")
         
         # Validar que la acción es permitida
         transicion = self._validate_and_get_transition(mision, action, user)
+        print(f"🔍 DEBUG execute_workflow_action: Transición validada")
         
         # Determinar el tipo específico de acción y procesarla
+        if not mision.estado_flujo:
+            print(f"🔍 ERROR execute_workflow_action: estado_flujo es None después de _get_mission_with_validation")
+            raise WorkflowException(f"Estado de flujo no disponible para misión {mission_id}")
         estado_anterior = mision.estado_flujo.nombre_estado
+        print(f"🔍 DEBUG execute_workflow_action: estado_anterior = {estado_anterior}")
         
         try:
             # Procesar la acción según el tipo y permisos
@@ -612,14 +717,25 @@ class WorkflowService:
         """
         Procesa acciones específicas según los permisos y tipo de acción.
         """
+        print(f"🔍 DEBUG _process_specific_action: Iniciando para misión {mision.id_mision}")
+        print(f"🔍 DEBUG _process_specific_action: estado_flujo es None: {mision.estado_flujo is None}")
+        
+        if not mision.estado_flujo:
+            print(f"🔍 ERROR _process_specific_action: estado_flujo es None para misión {mision.id_mision}")
+            raise WorkflowException(f"Estado de flujo no disponible para misión {mision.id_mision}")
+        
+        print(f"🔍 DEBUG _process_specific_action: Estado actual: {mision.estado_flujo.nombre_estado}")
+        
         # Normalizar el tipo de acción a string
         accion_str = transicion.tipo_accion.value if hasattr(transicion.tipo_accion, 'value') else str(transicion.tipo_accion)
+        print(f"DEBUG PROCESS: Acción: {accion_str}")
         
         # Determinar el tipo de procesador basado en permisos y estado
         estado_actual = mision.estado_flujo.nombre_estado
         
         if accion_str == 'APROBAR':
             if estado_actual == 'PENDIENTE_JEFE':
+                print(f"DEBUG PROCESS: Llamando a _process_jefe_approval para misión {mision.id_mision}")
                 return self._process_jefe_approval(mision, transicion, request_data, user, client_ip)
             elif estado_actual == 'PENDIENTE_REVISION_TESORERIA':
                 return self._process_tesoreria_approval(mision, transicion, request_data, user)
@@ -690,8 +806,144 @@ class WorkflowService:
         if user_id:
             mision.id_jefe = user_id
         
+        estado_anterior = mision.estado_flujo.nombre_estado
+        print(f"DEBUG JEFE: estado_anterior={estado_anterior}")
+        print(f"DEBUG JEFE: transicion.id_estado_destino={transicion.id_estado_destino}")
+        print(f"DEBUG JEFE: mision.id_estado_flujo antes={mision.id_estado_flujo}")
+        
         mision.id_estado_flujo = transicion.id_estado_destino
+        
+        # Verificar si el estado destino es válido
+        if transicion.id_estado_destino is None:
+            logger.error(f"ERROR: transicion.id_estado_destino es None para misión {mision.id_mision}")
+            raise WorkflowException("No se pudo determinar el estado destino de la transición")
+        
+        # Obtener el estado nuevo de forma segura
+        estado_nuevo_obj = self._states_cache.get(transicion.id_estado_destino)
+        if estado_nuevo_obj is None:
+            logger.error(f"No se encontró el estado con ID {transicion.id_estado_destino} en el caché")
+            # Buscar el estado en la base de datos como fallback
+            estado_nuevo_obj = self.db.query(EstadoFlujo).filter(EstadoFlujo.id_estado_flujo == transicion.id_estado_destino).first()
+            if estado_nuevo_obj:
+                # Actualizar el caché con ambos índices
+                self._states_cache[estado_nuevo_obj.nombre_estado] = estado_nuevo_obj
+                self._states_cache[estado_nuevo_obj.id_estado_flujo] = estado_nuevo_obj
+                estado_nuevo = estado_nuevo_obj.nombre_estado
+            else:
+                logger.error(f"No se pudo encontrar el estado con ID {transicion.id_estado_destino}")
+                raise WorkflowException(f"No se pudo encontrar el estado con ID {transicion.id_estado_destino}")
+        else:
+            estado_nuevo = estado_nuevo_obj.nombre_estado
+        
+        print(f"DEBUG JEFE: estado_nuevo={estado_nuevo}")
+        
         self._create_history_record(mision, transicion, request_data, user, client_ip)
+        
+        # Enviar notificación por email (asíncrono)
+        print(f"DEBUG EMAIL: Intentando enviar notificación para misión {mision.id_mision}")
+        print(f"DEBUG EMAIL: estado_anterior={estado_anterior}, estado_nuevo={estado_nuevo}")
+        print(f"DEBUG EMAIL: approved_by={user_name}")
+        
+        try:
+            import asyncio
+            from app.api.v1.missions import get_beneficiary_names
+            
+            # Preparar datos para la notificación
+            data = {
+                'numero_solicitud': mision.numero_solicitud,
+                'tipo': mision.tipo_mision.value,
+                'solicitante': get_beneficiary_names(self.db_rrhh, [mision.beneficiario_personal_id]).get(mision.beneficiario_personal_id, 'N/A'),
+                'fecha': mision.fecha_salida.strftime('%d/%m/%Y') if mision.fecha_salida else 'N/A',
+                'monto': f"${mision.monto_total_calculado:,.2f}",
+                'objetivo': mision.objetivo_mision or 'N/A'
+            }
+            
+            print(f"DEBUG EMAIL: datos preparados={data}")
+            
+            # Enviar notificación de workflow (temporalmente síncrono para debug)
+            try:
+                import asyncio
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # Si ya hay un loop corriendo, crear una tarea
+                    asyncio.create_task(
+                        self._email_service.send_workflow_notification(
+                            mission_id=mision.id_mision,
+                            current_state=estado_anterior,
+                            next_state=estado_nuevo,
+                            approved_by=user_name,
+                            data=data,
+                            db_rrhh=self.db_rrhh
+                        )
+                    )
+                else:
+                    # Si no hay loop corriendo, ejecutar directamente
+                    loop.run_until_complete(
+                        self._email_service.send_workflow_notification(
+                            mission_id=mision.id_mision,
+                            current_state=estado_anterior,
+                            next_state=estado_nuevo,
+                            approved_by=user_name,
+                            data=data,
+                            db_rrhh=self.db_rrhh
+                        )
+                    )
+            except Exception as e:
+                print(f"DEBUG EMAIL ERROR en asyncio: {str(e)}")
+                # Fallback: intentar ejecutar de forma síncrona
+                try:
+                    import asyncio
+                    asyncio.run(
+                        self._email_service.send_workflow_notification(
+                            mission_id=mision.id_mision,
+                            current_state=estado_anterior,
+                            next_state=estado_nuevo,
+                            approved_by=user_name,
+                            data=data,
+                            db_rrhh=self.db_rrhh
+                        )
+                    )
+                except Exception as e2:
+                    print(f"DEBUG EMAIL ERROR en fallback: {str(e2)}")
+            
+            print(f"DEBUG EMAIL: Tarea de notificación creada exitosamente")
+            
+        except Exception as e:
+            logger.error(f"Error enviando notificación de workflow: {str(e)}")
+            print(f"DEBUG EMAIL ERROR: {str(e)}")
+        
+        # Crear notificaciones en base de datos para el departamento siguiente
+        try:
+            print(f"DEBUG NOTIFICATION: Creando notificaciones para departamento siguiente")
+            
+            # Determinar el tipo de solicitud para personalizar el mensaje
+            tipo_solicitud = mision.tipo_mision.value if hasattr(mision.tipo_mision, 'value') else str(mision.tipo_mision)
+            if tipo_solicitud == 'VIATICOS':
+                tipo_descripcion = "Viáticos"
+                flujo_descripcion = "flujo completo"
+            elif tipo_solicitud == 'CAJA_MENUDA':
+                tipo_descripcion = "Caja Menuda"
+                flujo_descripcion = "flujo simplificado"
+            else:
+                tipo_descripcion = tipo_solicitud
+                flujo_descripcion = "flujo"
+            
+            titulo = f"Solicitud de {tipo_descripcion} Pendiente - {mision.numero_solicitud}"
+            descripcion = f"Solicitud de {tipo_descripcion} {mision.numero_solicitud} aprobada por {user_name}. Pendiente revisión en {flujo_descripcion}."
+            
+            notifications_created = self._notification_service.create_workflow_notifications_for_department(
+                mission_id=mision.id_mision,
+                next_state=estado_nuevo,
+                titulo=titulo,
+                descripcion=descripcion
+            )
+            
+            print(f"DEBUG NOTIFICATION: {len(notifications_created)} notificaciones creadas para departamento siguiente")
+            
+        except Exception as e:
+            logger.error(f"Error creando notificaciones de workflow: {str(e)}")
+            print(f"DEBUG NOTIFICATION ERROR: {str(e)}")
+        
         return {
             'message': f'Solicitud aprobada por {user_name}',
             'datos_adicionales': {
@@ -718,6 +970,37 @@ class WorkflowService:
             # Para usuarios financieros, no validar supervisión
             user_name = user.login_username if hasattr(user, 'login_username') else "Usuario Financiero"
             user_cedula = None
+        
+        # Crear notificación para el solicitante sobre el rechazo
+        try:
+            print(f"DEBUG NOTIFICATION: Creando notificación de rechazo para solicitante")
+            
+            # Determinar el tipo de solicitud para personalizar el mensaje
+            tipo_solicitud = mision.tipo_mision.value if hasattr(mision.tipo_mision, 'value') else str(mision.tipo_mision)
+            if tipo_solicitud == 'VIATICOS':
+                tipo_descripcion = "Viáticos"
+            elif tipo_solicitud == 'CAJA_MENUDA':
+                tipo_descripcion = "Caja Menuda"
+            else:
+                tipo_descripcion = tipo_solicitud
+            
+            titulo = f"Solicitud de {tipo_descripcion} Rechazada - {mision.numero_solicitud}"
+            descripcion = f"Solicitud de {tipo_descripcion} {mision.numero_solicitud} rechazada por {user_name}"
+            
+            notification_data = NotificacionCreate(
+                titulo=titulo,
+                descripcion=descripcion,
+                personal_id=mision.beneficiario_personal_id,
+                id_mision=mision.id_mision,
+                visto=False
+            )
+            
+            self._notification_service.create_notification(notification_data)
+            print(f"DEBUG NOTIFICATION: Notificación de rechazo creada para solicitante")
+            
+        except Exception as e:
+            logger.error(f"Error creando notificación de rechazo: {str(e)}")
+            print(f"DEBUG NOTIFICATION ERROR: {str(e)}")
         
         return {
             'message': f'Solicitud rechazada por {user_name}',
@@ -751,6 +1034,25 @@ class WorkflowService:
             # Para viáticos, seguir el flujo normal a presupuesto
             mensaje += ' - Enviada a asignación presupuestaria'
         
+        if not mision.estado_flujo:
+            raise WorkflowException(f"Estado de flujo no disponible para misión {mision.id_mision}")
+        
+        # Guardar el estado anterior ANTES de cambiar el id_estado_flujo
+        estado_anterior = mision.estado_flujo.nombre_estado
+        
+        # Obtener el estado nuevo ANTES de cambiar el id_estado_flujo
+        # Buscar por ID en lugar de por nombre
+        estado_nuevo_obj = None
+        for estado in self._states_cache.values():
+            if estado.id_estado_flujo == transicion.id_estado_destino:
+                estado_nuevo_obj = estado
+                break
+        
+        if not estado_nuevo_obj:
+            raise WorkflowException(f"Estado destino no encontrado: {transicion.id_estado_destino}")
+        estado_nuevo = estado_nuevo_obj.nombre_estado
+        
+        # Ahora sí cambiar el estado
         mision.id_estado_flujo = transicion.id_estado_destino
         print(f"DEBUG TESORERIA: transicion.id_estado_destino={transicion.id_estado_destino}")
         
@@ -762,6 +1064,68 @@ class WorkflowService:
             user_name = user.get('apenom', 'Analista Tesorería')
         else:
             user_name = user.login_username if hasattr(user, 'login_username') else "Analista Tesorería"
+        
+        # Enviar notificación por email (asíncrono)
+        try:
+            import asyncio
+            from app.api.v1.missions import get_beneficiary_names
+            
+            # Preparar datos para la notificación
+            data = {
+                'numero_solicitud': mision.numero_solicitud,
+                'tipo': mision.tipo_mision.value,
+                'solicitante': get_beneficiary_names(self.db_rrhh, [mision.beneficiario_personal_id]).get(mision.beneficiario_personal_id, 'N/A'),
+                'fecha': mision.fecha_salida.strftime('%d/%m/%Y') if mision.fecha_salida else 'N/A',
+                'monto': f"${mision.monto_total_calculado:,.2f}",
+                'objetivo': mision.objetivo_mision or 'N/A'
+            }
+            
+            # Enviar notificación de workflow
+            asyncio.create_task(
+                self._email_service.send_workflow_notification(
+                    mission_id=mision.id_mision,
+                    current_state=estado_anterior,
+                    next_state=estado_nuevo,
+                    approved_by=user_name,
+                    data=data,
+                    db_rrhh=self.db_rrhh
+                )
+            )
+            
+        except Exception as e:
+            logger.error(f"Error enviando notificación de workflow: {str(e)}")
+        
+        # Crear notificaciones en base de datos para el departamento siguiente
+        try:
+            print(f"DEBUG NOTIFICATION: Creando notificaciones para departamento siguiente")
+            
+            # Determinar el tipo de solicitud para personalizar el mensaje
+            tipo_solicitud = mision.tipo_mision.value if hasattr(mision.tipo_mision, 'value') else str(mision.tipo_mision)
+            if tipo_solicitud == 'VIATICOS':
+                tipo_descripcion = "Viáticos"
+                flujo_descripcion = "flujo completo"
+            elif tipo_solicitud == 'CAJA_MENUDA':
+                tipo_descripcion = "Caja Menuda"
+                flujo_descripcion = "flujo simplificado"
+            else:
+                tipo_descripcion = tipo_solicitud
+                flujo_descripcion = "flujo"
+            
+            titulo = f"Solicitud de {tipo_descripcion} Pendiente - {mision.numero_solicitud}"
+            descripcion = f"Solicitud de {tipo_descripcion} {mision.numero_solicitud} aprobada por {user_name}. Pendiente revisión en {flujo_descripcion}."
+            
+            notifications_created = self._notification_service.create_workflow_notifications_for_department(
+                mission_id=mision.id_mision,
+                next_state=estado_nuevo,
+                titulo=titulo,
+                descripcion=descripcion
+            )
+            
+            print(f"DEBUG NOTIFICATION: {len(notifications_created)} notificaciones creadas para departamento siguiente")
+            
+        except Exception as e:
+            logger.error(f"Error creando notificaciones de workflow: {str(e)}")
+            print(f"DEBUG NOTIFICATION ERROR: {str(e)}")
         
         return {
             'message': mensaje,
@@ -793,6 +1157,56 @@ class WorkflowService:
         else:
             user_name = user.login_username if hasattr(user, 'login_username') else "Analista Pago"
         
+        # Crear notificación para el solicitante sobre el pago completado
+        try:
+            print(f"DEBUG NOTIFICATION: Creando notificación de pago completado para solicitante")
+            titulo = f"Pago Completado - {mision.numero_solicitud}"
+            descripcion = f"Pago de solicitud {mision.numero_solicitud} confirmado por {user_name}"
+            
+            notification_data = NotificacionCreate(
+                titulo=titulo,
+                descripcion=descripcion,
+                personal_id=mision.beneficiario_personal_id,
+                id_mision=mision.id_mision,
+                visto=False
+            )
+            
+            self._notification_service.create_notification(notification_data)
+            print(f"DEBUG NOTIFICATION: Notificación de pago completado creada para solicitante")
+            
+        except Exception as e:
+            logger.error(f"Error creando notificación de pago completado: {str(e)}")
+            print(f"DEBUG NOTIFICATION ERROR: {str(e)}")
+
+        # Enviar correo electrónico al solicitante cuando se confirma el pago (estado PAGADO)
+        try:
+            print(f"DEBUG EMAIL: Enviando correo de pago confirmado al solicitante")
+            
+            # Preparar datos para el email
+            email_data = self._prepare_notification_data(mision)
+            email_data.update({
+                'metodo_pago': 'TRANSFERENCIA/ACH',  # Para pagos confirmados, asumimos transferencia/ACH
+                'monto_pagado': float(mision.monto_aprobado),
+                'procesado_por': user_name,
+                'fecha_pago': datetime.now().isoformat()
+            })
+            
+            # Enviar email de forma asíncrona
+            import asyncio
+            asyncio.create_task(
+                self._email_service.send_mission_notification(
+                    mission_id=mision.id_mision,
+                    notification_type='payment',
+                    data=email_data,
+                    db_rrhh=self.db_rrhh
+                )
+            )
+            print(f"DEBUG EMAIL: Correo de pago confirmado enviado al solicitante")
+            
+        except Exception as e:
+            logger.error(f"Error enviando correo de pago confirmado: {str(e)}")
+            print(f"DEBUG EMAIL ERROR: {str(e)}")
+        
         return {
             'message': 'Pago confirmado exitosamente - Proceso completado',
             'datos_adicionales': {
@@ -813,6 +1227,25 @@ class WorkflowService:
         if isinstance(user, Usuario):
             mision.id_presupuesto = user.id_usuario
             
+        if not mision.estado_flujo:
+            raise WorkflowException(f"Estado de flujo no disponible para misión {mision.id_mision}")
+        
+        # Guardar el estado anterior ANTES de cambiar el id_estado_flujo
+        estado_anterior = mision.estado_flujo.nombre_estado
+        
+        # Obtener el estado nuevo ANTES de cambiar el id_estado_flujo
+        # Buscar por ID en lugar de por nombre
+        estado_nuevo_obj = None
+        for estado in self._states_cache.values():
+            if estado.id_estado_flujo == transicion.id_estado_destino:
+                estado_nuevo_obj = estado
+                break
+        
+        if not estado_nuevo_obj:
+            raise WorkflowException(f"Estado destino no encontrado: {transicion.id_estado_destino}")
+        estado_nuevo = estado_nuevo_obj.nombre_estado
+        
+        # Ahora sí cambiar el estado
         mision.id_estado_flujo = transicion.id_estado_destino
         
         # Validar que las partidas existen en el sistema
@@ -857,6 +1290,68 @@ class WorkflowService:
         else:
             user_name = user.login_username if hasattr(user, 'login_username') else "Analista Presupuesto"
         
+        # Enviar notificación por email (asíncrono)
+        try:
+            import asyncio
+            from app.api.v1.missions import get_beneficiary_names
+            
+            # Preparar datos para la notificación
+            data = {
+                'numero_solicitud': mision.numero_solicitud,
+                'tipo': mision.tipo_mision.value,
+                'solicitante': get_beneficiary_names(self.db_rrhh, [mision.beneficiario_personal_id]).get(mision.beneficiario_personal_id, 'N/A'),
+                'fecha': mision.fecha_salida.strftime('%d/%m/%Y') if mision.fecha_salida else 'N/A',
+                'monto': f"${mision.monto_total_calculado:,.2f}",
+                'objetivo': mision.objetivo_mision or 'N/A'
+            }
+            
+            # Enviar notificación de workflow
+            asyncio.create_task(
+                self._email_service.send_workflow_notification(
+                    mission_id=mision.id_mision,
+                    current_state=estado_anterior,
+                    next_state=estado_nuevo,
+                    approved_by=user_name,
+                    data=data,
+                    db_rrhh=self.db_rrhh
+                )
+            )
+            
+        except Exception as e:
+            logger.error(f"Error enviando notificación de workflow: {str(e)}")
+        
+        # Crear notificaciones en base de datos para el departamento siguiente
+        try:
+            print(f"DEBUG NOTIFICATION: Creando notificaciones para departamento siguiente")
+            
+            # Determinar el tipo de solicitud para personalizar el mensaje
+            tipo_solicitud = mision.tipo_mision.value if hasattr(mision.tipo_mision, 'value') else str(mision.tipo_mision)
+            if tipo_solicitud == 'VIATICOS':
+                tipo_descripcion = "Viáticos"
+                flujo_descripcion = "flujo completo"
+            elif tipo_solicitud == 'CAJA_MENUDA':
+                tipo_descripcion = "Caja Menuda"
+                flujo_descripcion = "flujo simplificado"
+            else:
+                tipo_descripcion = tipo_solicitud
+                flujo_descripcion = "flujo"
+            
+            titulo = f"Solicitud de {tipo_descripcion} Pendiente - {mision.numero_solicitud}"
+            descripcion = f"Solicitud de {tipo_descripcion} {mision.numero_solicitud} aprobada por {user_name}. Pendiente revisión en {flujo_descripcion}."
+            
+            notifications_created = self._notification_service.create_workflow_notifications_for_department(
+                mission_id=mision.id_mision,
+                next_state=estado_nuevo,
+                titulo=titulo,
+                descripcion=descripcion
+            )
+            
+            print(f"DEBUG NOTIFICATION: {len(notifications_created)} notificaciones creadas para departamento siguiente")
+            
+        except Exception as e:
+            logger.error(f"Error creando notificaciones de workflow: {str(e)}")
+            print(f"DEBUG NOTIFICATION ERROR: {str(e)}")
+        
         return {
             'message': f'Partidas presupuestarias asignadas. Total distribuido: B/. {total_asignado} en {len(request_data.partidas)} partidas',
             'datos_adicionales': {
@@ -879,6 +1374,25 @@ class WorkflowService:
         if isinstance(user, Usuario):
             mision.id_contabilidad = user.id_usuario
             
+        if not mision.estado_flujo:
+            raise WorkflowException(f"Estado de flujo no disponible para misión {mision.id_mision}")
+        
+        # Guardar el estado anterior ANTES de cambiar el id_estado_flujo
+        estado_anterior = mision.estado_flujo.nombre_estado
+        
+        # Obtener el estado nuevo ANTES de cambiar el id_estado_flujo
+        # Buscar por ID en lugar de por nombre
+        estado_nuevo_obj = None
+        for estado in self._states_cache.values():
+            if estado.id_estado_flujo == transicion.id_estado_destino:
+                estado_nuevo_obj = estado
+                break
+        
+        if not estado_nuevo_obj:
+            raise WorkflowException(f"Estado destino no encontrado: {transicion.id_estado_destino}")
+        estado_nuevo = estado_nuevo_obj.nombre_estado
+        
+        # Ahora sí cambiar el estado
         mision.id_estado_flujo = transicion.id_estado_destino
         datos_adicionales = {}
         
@@ -895,6 +1409,68 @@ class WorkflowService:
         
         # Crear historial de flujo
         self._create_history_record(mision, transicion, request_data, user, None)
+        
+        # Enviar notificación por email (asíncrono)
+        try:
+            import asyncio
+            from app.api.v1.missions import get_beneficiary_names
+            
+            # Preparar datos para la notificación
+            data = {
+                'numero_solicitud': mision.numero_solicitud,
+                'tipo': mision.tipo_mision.value,
+                'solicitante': get_beneficiary_names(self.db_rrhh, [mision.beneficiario_personal_id]).get(mision.beneficiario_personal_id, 'N/A'),
+                'fecha': mision.fecha_salida.strftime('%d/%m/%Y') if mision.fecha_salida else 'N/A',
+                'monto': f"${mision.monto_total_calculado:,.2f}",
+                'objetivo': mision.objetivo_mision or 'N/A'
+            }
+            
+            # Enviar notificación de workflow
+            asyncio.create_task(
+                self._email_service.send_workflow_notification(
+                    mission_id=mision.id_mision,
+                    current_state=estado_anterior,
+                    next_state=estado_nuevo,
+                    approved_by=user_name,
+                    data=data,
+                    db_rrhh=self.db_rrhh
+                )
+            )
+            
+        except Exception as e:
+            logger.error(f"Error enviando notificación de workflow: {str(e)}")
+        
+        # Crear notificaciones en base de datos para el departamento siguiente
+        try:
+            print(f"DEBUG NOTIFICATION: Creando notificaciones para departamento siguiente")
+            
+            # Determinar el tipo de solicitud para personalizar el mensaje
+            tipo_solicitud = mision.tipo_mision.value if hasattr(mision.tipo_mision, 'value') else str(mision.tipo_mision)
+            if tipo_solicitud == 'VIATICOS':
+                tipo_descripcion = "Viáticos"
+                flujo_descripcion = "flujo completo"
+            elif tipo_solicitud == 'CAJA_MENUDA':
+                tipo_descripcion = "Caja Menuda"
+                flujo_descripcion = "flujo simplificado"
+            else:
+                tipo_descripcion = tipo_solicitud
+                flujo_descripcion = "flujo"
+            
+            titulo = f"Solicitud de {tipo_descripcion} Pendiente - {mision.numero_solicitud}"
+            descripcion = f"Solicitud de {tipo_descripcion} {mision.numero_solicitud} aprobada por {user_name}. Pendiente revisión en {flujo_descripcion}."
+            
+            notifications_created = self._notification_service.create_workflow_notifications_for_department(
+                mission_id=mision.id_mision,
+                next_state=estado_nuevo,
+                titulo=titulo,
+                descripcion=descripcion
+            )
+            
+            print(f"DEBUG NOTIFICATION: {len(notifications_created)} notificaciones creadas para departamento siguiente")
+            
+        except Exception as e:
+            logger.error(f"Error creando notificaciones de workflow: {str(e)}")
+            print(f"DEBUG NOTIFICATION ERROR: {str(e)}")
         
         return {
             'message': 'Solicitud procesada por Contabilidad',
@@ -937,15 +1513,29 @@ class WorkflowService:
             estado_cgr = self._states_cache.get('PENDIENTE_REFRENDO_CGR')
             if estado_cgr:
                 transicion.id_estado_destino = estado_cgr.id_estado_flujo
-                mision.id_estado_flujo = estado_cgr.id_estado_flujo  # <-- Forzar cambio de estado
             mensaje = f"Solicitud aprobada por Director Finanzas - Enviada a refrendo CGR (monto: ${mision.monto_aprobado} >= ${monto_refrendo_cgr})"
         else:
             # Si no requiere CGR, ir directo a aprobado para pago
             estado_pago = self._states_cache.get('APROBADO_PARA_PAGO')
             if estado_pago:
                 transicion.id_estado_destino = estado_pago.id_estado_flujo
-                mision.id_estado_flujo = estado_pago.id_estado_flujo  # <-- Forzar cambio de estado
             mensaje = f"Solicitud aprobada por Director Finanzas - Aprobada para pago (monto: ${mision.monto_aprobado} < ${monto_refrendo_cgr})"
+        
+        if not mision.estado_flujo:
+            raise WorkflowException(f"Estado de flujo no disponible para misión {mision.id_mision}")
+        estado_anterior = mision.estado_flujo.nombre_estado
+        
+        # Verificar que el estado destino existe en el cache
+        logger.info(f"🔍 DEBUG: Buscando estado destino ID {transicion.id_estado_destino} en cache")
+        logger.info(f"🔍 DEBUG: Claves disponibles en cache: {list(self._states_cache.keys())}")
+        estado_destino_obj = self._states_cache.get(transicion.id_estado_destino)
+        if not estado_destino_obj:
+            logger.error(f"🔍 ERROR: Estado destino {transicion.id_estado_destino} no encontrado en el cache")
+            logger.error(f"🔍 ERROR: Cache contiene {len(self._states_cache)} elementos")
+            raise WorkflowException(f"Estado destino {transicion.id_estado_destino} no encontrado en el cache")
+        estado_nuevo = estado_destino_obj.nombre_estado
+
+        mision.id_estado_flujo = transicion.id_estado_destino
         
         # Crear historial de flujo
         self._create_history_record(mision, transicion, request_data, user, None)
@@ -955,6 +1545,68 @@ class WorkflowService:
             user_name = user.get('apenom', 'Director Finanzas')
         else:
             user_name = user.login_username if hasattr(user, 'login_username') else "Director Finanzas"
+        
+        # Enviar notificación por email (asíncrono)
+        try:
+            import asyncio
+            from app.api.v1.missions import get_beneficiary_names
+            
+            # Preparar datos para la notificación
+            data = {
+                'numero_solicitud': mision.numero_solicitud,
+                'tipo': mision.tipo_mision.value,
+                'solicitante': get_beneficiary_names(self.db_rrhh, [mision.beneficiario_personal_id]).get(mision.beneficiario_personal_id, 'N/A'),
+                'fecha': mision.fecha_salida.strftime('%d/%m/%Y') if mision.fecha_salida else 'N/A',
+                'monto': f"${mision.monto_total_calculado:,.2f}",
+                'objetivo': mision.objetivo_mision or 'N/A'
+            }
+            
+            # Enviar notificación de workflow
+            asyncio.create_task(
+                self._email_service.send_workflow_notification(
+                    mission_id=mision.id_mision,
+                    current_state=estado_anterior,
+                    next_state=estado_nuevo,
+                    approved_by=user_name,
+                    data=data,
+                    db_rrhh=self.db_rrhh
+                )
+            )
+            
+        except Exception as e:
+            logger.error(f"Error enviando notificación de workflow: {str(e)}")
+        
+        # Crear notificaciones en base de datos para el departamento siguiente
+        try:
+            print(f"DEBUG NOTIFICATION: Creando notificaciones para departamento siguiente")
+            
+            # Determinar el tipo de solicitud para personalizar el mensaje
+            tipo_solicitud = mision.tipo_mision.value if hasattr(mision.tipo_mision, 'value') else str(mision.tipo_mision)
+            if tipo_solicitud == 'VIATICOS':
+                tipo_descripcion = "Viáticos"
+                flujo_descripcion = "flujo completo"
+            elif tipo_solicitud == 'CAJA_MENUDA':
+                tipo_descripcion = "Caja Menuda"
+                flujo_descripcion = "flujo simplificado"
+            else:
+                tipo_descripcion = tipo_solicitud
+                flujo_descripcion = "flujo"
+            
+            titulo = f"Solicitud de {tipo_descripcion} Pendiente - {mision.numero_solicitud}"
+            descripcion = f"Solicitud de {tipo_descripcion} {mision.numero_solicitud} aprobada por {user_name}. Pendiente revisión en {flujo_descripcion}."
+            
+            notifications_created = self._notification_service.create_workflow_notifications_for_department(
+                mission_id=mision.id_mision,
+                next_state=estado_nuevo,
+                titulo=titulo,
+                descripcion=descripcion
+            )
+            
+            print(f"DEBUG NOTIFICATION: {len(notifications_created)} notificaciones creadas para departamento siguiente")
+            
+        except Exception as e:
+            logger.error(f"Error creando notificaciones de workflow: {str(e)}")
+            print(f"DEBUG NOTIFICATION ERROR: {str(e)}")
 
         return {
             'message': mensaje,
@@ -996,8 +1648,84 @@ class WorkflowService:
         if hasattr(request_data, 'numero_refrendo') and request_data.numero_refrendo:
             datos_adicionales['numero_refrendo'] = request_data.numero_refrendo
         
+        if not mision.estado_flujo:
+            raise WorkflowException(f"Estado de flujo no disponible para misión {mision.id_mision}")
+        estado_anterior = mision.estado_flujo.nombre_estado
+        
+        # Verificar que el estado destino existe en el cache
+        logger.info(f"🔍 DEBUG: Buscando estado destino ID {transicion.id_estado_destino} en cache")
+        logger.info(f"🔍 DEBUG: Claves disponibles en cache: {list(self._states_cache.keys())}")
+        estado_destino_obj = self._states_cache.get(transicion.id_estado_destino)
+        if not estado_destino_obj:
+            logger.error(f"🔍 ERROR: Estado destino {transicion.id_estado_destino} no encontrado en el cache")
+            logger.error(f"🔍 ERROR: Cache contiene {len(self._states_cache)} elementos")
+            raise WorkflowException(f"Estado destino {transicion.id_estado_destino} no encontrado en el cache")
+        estado_nuevo = estado_destino_obj.nombre_estado
+        
         # Crear historial de flujo
         self._create_history_record(mision, transicion, request_data, user, None)
+        
+        # Enviar notificación por email (asíncrono)
+        try:
+            import asyncio
+            from app.api.v1.missions import get_beneficiary_names
+            
+            # Preparar datos para la notificación
+            data = {
+                'numero_solicitud': mision.numero_solicitud,
+                'tipo': mision.tipo_mision.value,
+                'solicitante': get_beneficiary_names(self.db_rrhh, [mision.beneficiario_personal_id]).get(mision.beneficiario_personal_id, 'N/A'),
+                'fecha': mision.fecha_salida.strftime('%d/%m/%Y') if mision.fecha_salida else 'N/A',
+                'monto': f"${mision.monto_total_calculado:,.2f}",
+                'objetivo': mision.objetivo_mision or 'N/A'
+            }
+            
+            # Enviar notificación de workflow
+            asyncio.create_task(
+                self._email_service.send_workflow_notification(
+                    mission_id=mision.id_mision,
+                    current_state=estado_anterior,
+                    next_state=estado_nuevo,
+                    approved_by=user_name,
+                    data=data,
+                    db_rrhh=self.db_rrhh
+                )
+            )
+            
+        except Exception as e:
+            logger.error(f"Error enviando notificación de workflow: {str(e)}")
+        
+        # Crear notificaciones en base de datos para el departamento siguiente
+        try:
+            print(f"DEBUG NOTIFICATION: Creando notificaciones para departamento siguiente")
+            
+            # Determinar el tipo de solicitud para personalizar el mensaje
+            tipo_solicitud = mision.tipo_mision.value if hasattr(mision.tipo_mision, 'value') else str(mision.tipo_mision)
+            if tipo_solicitud == 'VIATICOS':
+                tipo_descripcion = "Viáticos"
+                flujo_descripcion = "flujo completo"
+            elif tipo_solicitud == 'CAJA_MENUDA':
+                tipo_descripcion = "Caja Menuda"
+                flujo_descripcion = "flujo simplificado"
+            else:
+                tipo_descripcion = tipo_solicitud
+                flujo_descripcion = "flujo"
+            
+            titulo = f"Solicitud de {tipo_descripcion} Pendiente - {mision.numero_solicitud}"
+            descripcion = f"Solicitud de {tipo_descripcion} {mision.numero_solicitud} refrendada por CGR. Pendiente revisión en {flujo_descripcion}."
+            
+            notifications_created = self._notification_service.create_workflow_notifications_for_department(
+                mission_id=mision.id_mision,
+                next_state=estado_nuevo,
+                titulo=titulo,
+                descripcion=descripcion
+            )
+            
+            print(f"DEBUG NOTIFICATION: {len(notifications_created)} notificaciones creadas para departamento siguiente")
+            
+        except Exception as e:
+            logger.error(f"Error creando notificaciones de workflow: {str(e)}")
+            print(f"DEBUG NOTIFICATION ERROR: {str(e)}")
         
         return {
             'message': 'Refrendo CGR completado exitosamente - Solicitud aprobada para pago',
@@ -1040,7 +1768,8 @@ class WorkflowService:
         fecha_pago = request_data.fecha_pago or datetime.now()
 
         # Crear historial manualmente con los estados correctos
-        user_id = user.id_usuario if isinstance(user, Usuario) else 1
+        # Para empleados (dict), no forzar 1: dejar NULL en id_usuario_accion
+        user_id = user.id_usuario if isinstance(user, Usuario) else None
 
         historial = HistorialFlujo(
             id_mision=mision.id_mision,
@@ -1055,7 +1784,8 @@ class WorkflowService:
                 'monto_pagado': float(mision.monto_aprobado),
                 'numero_transaccion': getattr(request_data, 'numero_transaccion', None),
                 'banco_origen': getattr(request_data, 'banco_origen', None),
-                'fecha_pago': fecha_pago.isoformat() if fecha_pago else None
+                'fecha_pago': fecha_pago.isoformat() if fecha_pago else None,
+                'usuario_cedula': None if isinstance(user, Usuario) else user.get('cedula')
             },
             ip_usuario=None
         )
@@ -1085,6 +1815,68 @@ class WorkflowService:
         else:
             mensaje += ' - Pendiente firma electrónica'
 
+        # Crear notificación para el solicitante sobre el pago procesado
+        try:
+            print(f"DEBUG NOTIFICATION: Creando notificación de pago procesado para solicitante")
+            titulo = f"Pago Procesado - {mision.numero_solicitud}"
+            descripcion = f"Pago de solicitud {mision.numero_solicitud} procesado vía {request_data.metodo_pago}"
+            if request_data.metodo_pago == 'EFECTIVO':
+                descripcion += ". Completado."
+            else:
+                descripcion += ". Pendiente firma."
+            
+            notification_data = NotificacionCreate(
+                titulo=titulo,
+                descripcion=descripcion,
+                personal_id=mision.beneficiario_personal_id,
+                id_mision=mision.id_mision,
+                visto=False
+            )
+            
+            self._notification_service.create_notification(notification_data)
+            print(f"DEBUG NOTIFICATION: Notificación de pago procesado creada para solicitante")
+            
+        except Exception as e:
+            logger.error(f"Error creando notificación de pago procesado: {str(e)}")
+            print(f"DEBUG NOTIFICATION ERROR: {str(e)}")
+
+        # Enviar correo electrónico al solicitante si el pago es en efectivo (estado PAGADO)
+        if request_data.metodo_pago == 'EFECTIVO':
+            try:
+                print(f"DEBUG EMAIL: Enviando correo de pago completado al solicitante")
+                
+                # Preparar datos para el email
+                email_data = self._prepare_notification_data(mision)
+                email_data.update({
+                    'metodo_pago': request_data.metodo_pago,
+                    'monto_pagado': float(mision.monto_aprobado),
+                    'procesado_por': user.login_username if isinstance(user, Usuario) else user.get('apenom', 'Analista Pago'),
+                    'fecha_pago': fecha_pago.isoformat() if fecha_pago else None
+                })
+                
+                # Agregar datos adicionales si están disponibles
+                if hasattr(request_data, 'numero_transaccion') and request_data.numero_transaccion:
+                    email_data['numero_transaccion'] = request_data.numero_transaccion
+                
+                if hasattr(request_data, 'banco_origen') and request_data.banco_origen:
+                    email_data['banco_origen'] = request_data.banco_origen
+                
+                # Enviar email de forma asíncrona
+                import asyncio
+                asyncio.create_task(
+                    self._email_service.send_mission_notification(
+                        mission_id=mision.id_mision,
+                        notification_type='payment',
+                        data=email_data,
+                        db_rrhh=self.db_rrhh
+                    )
+                )
+                print(f"DEBUG EMAIL: Correo de pago completado enviado al solicitante")
+                
+            except Exception as e:
+                logger.error(f"Error enviando correo de pago completado: {str(e)}")
+                print(f"DEBUG EMAIL ERROR: {str(e)}")
+
         return {
             'message': mensaje,
             'datos_adicionales': datos_adicionales
@@ -1108,6 +1900,151 @@ class WorkflowService:
 
         # Crear historial de flujo
         self._create_history_record(mision, transicion, request_data, user, None)
+        
+        # Enviar notificación por email (asíncrono)
+        try:
+            import asyncio
+            from app.api.v1.missions import get_beneficiary_names
+            
+            # Preparar datos para la notificación
+            data = {
+                'numero_solicitud': mision.numero_solicitud,
+                'tipo': mision.tipo_mision.value,
+                'solicitante': get_beneficiary_names(self.db_rrhh, [mision.beneficiario_personal_id]).get(mision.beneficiario_personal_id, 'N/A'),
+                'fecha': mision.fecha_salida.strftime('%d/%m/%Y') if mision.fecha_salida else 'N/A',
+                'monto': f"${mision.monto_total_calculado:,.2f}",
+                'objetivo': mision.objetivo_mision or 'N/A'
+            }
+            
+            # Obtener el estado nuevo
+            estado_nuevo = mision.estado_flujo.nombre_estado if mision.estado_flujo else "DEVUELTO_CORRECCION"
+            
+            print(f"DEBUG EMAIL: Enviando notificación de devolución desde _process_return_for_correction")
+            print(f"DEBUG EMAIL: estado_nuevo={estado_nuevo}")
+            print(f"DEBUG EMAIL: user_name={user_name}")
+            
+            # Enviar notificación de devolución
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # Si ya hay un loop corriendo, crear una tarea
+                    asyncio.create_task(
+                        self._email_service.send_return_notification(
+                            mission_id=mision.id_mision,
+                            return_state=estado_nuevo,
+                            returned_by=user_name,
+                            observaciones=observacion or "Sin observaciones",
+                            data=data,
+                            db_rrhh=self.db_rrhh
+                        )
+                    )
+                else:
+                    # Si no hay loop corriendo, ejecutar directamente
+                    loop.run_until_complete(
+                        self._email_service.send_return_notification(
+                            mission_id=mision.id_mision,
+                            return_state=estado_nuevo,
+                            returned_by=user_name,
+                            observaciones=observacion or "Sin observaciones",
+                            data=data,
+                            db_rrhh=self.db_rrhh
+                        )
+                    )
+            except Exception as e:
+                print(f"DEBUG EMAIL ERROR en asyncio: {str(e)}")
+                # Fallback: intentar ejecutar de forma síncrona
+                try:
+                    import asyncio
+                    asyncio.run(
+                        self._email_service.send_return_notification(
+                            mission_id=mision.id_mision,
+                            return_state=estado_nuevo,
+                            returned_by=user_name,
+                            observaciones=observacion or "Sin observaciones",
+                            data=data,
+                            db_rrhh=self.db_rrhh
+                        )
+                    )
+                except Exception as e2:
+                    print(f"DEBUG EMAIL ERROR en fallback: {str(e2)}")
+            
+            print(f"DEBUG EMAIL: Tarea de notificación de devolución creada exitosamente")
+            
+        except Exception as e:
+            logger.error(f"Error enviando notificación de devolución: {str(e)}")
+            print(f"DEBUG EMAIL ERROR: {str(e)}")
+        
+        # Crear notificaciones según el tipo de devolución
+        try:
+            print(f"DEBUG NOTIFICATION: Creando notificaciones de devolución desde _process_return_for_correction")
+            print(f"DEBUG NOTIFICATION: estado_nuevo={estado_nuevo}")
+            
+            if estado_nuevo == "DEVUELTO_CORRECCION":
+                # Para DEVUELTO_CORRECCION: notificación para el solicitante
+                print(f"DEBUG NOTIFICATION: Creando notificación para solicitante (DEVUELTO_CORRECCION)")
+                titulo = f"Solicitud Devuelta - {mision.numero_solicitud}"
+                descripcion = f"Solicitud {mision.numero_solicitud} devuelta para corrección por {user_name}"
+                
+                notification_data = NotificacionCreate(
+                    titulo=titulo,
+                    descripcion=descripcion,
+                    personal_id=mision.beneficiario_personal_id,
+                    id_mision=mision.id_mision,
+                    visto=False
+                )
+                
+                self._notification_service.create_notification(notification_data)
+                print(f"DEBUG NOTIFICATION: Notificación creada para solicitante")
+                
+            elif estado_nuevo == "DEVUELTO_CORRECCION_JEFE":
+                # Para DEVUELTO_CORRECCION_JEFE: notificación para el jefe inmediato
+                print(f"DEBUG NOTIFICATION: Creando notificación para jefe inmediato (DEVUELTO_CORRECCION_JEFE)")
+                
+                # Obtener el jefe inmediato del departamento del solicitante
+                jefe_personal_id = self._get_jefe_inmediato_personal_id(mision.beneficiario_personal_id)
+                
+                if jefe_personal_id:
+                    titulo = f"Solicitud Devuelta - {mision.numero_solicitud}"
+                    descripcion = f"Solicitud {mision.numero_solicitud} devuelta para corrección por {user_name}"
+                    
+                    notification_data = NotificacionCreate(
+                        titulo=titulo,
+                        descripcion=descripcion,
+                        personal_id=jefe_personal_id,
+                        id_mision=mision.id_mision,
+                        visto=False
+                    )
+                    
+                    self._notification_service.create_notification(notification_data)
+                    print(f"DEBUG NOTIFICATION: Notificación creada para jefe inmediato (personal_id={jefe_personal_id})")
+                else:
+                    print(f"DEBUG NOTIFICATION: No se encontró jefe inmediato para personal_id={mision.beneficiario_personal_id}")
+                    
+            else:
+                # Para otros estados de devolución: notificaciones para todos los usuarios del departamento anterior
+                print(f"DEBUG NOTIFICATION: Creando notificaciones para departamento anterior ({nuevo_estado_nombre})")
+                
+                # Obtener el departamento anterior basado en el estado actual
+                departamento_anterior_id = self._get_previous_department_id(estado_anterior)
+                
+                if departamento_anterior_id:
+                    titulo = f"Solicitud Devuelta - {mision.numero_solicitud}"
+                    descripcion = f"Solicitud {mision.numero_solicitud} devuelta para corrección por {user_name}"
+                    
+                    # Crear notificaciones para todos los usuarios del departamento anterior
+                    self._notification_service.create_workflow_notifications_for_department(
+                        mission_id=mision.id_mision,
+                        next_state=nuevo_estado_nombre,
+                        titulo=titulo,
+                        descripcion=descripcion
+                    )
+                    print(f"DEBUG NOTIFICATION: Notificaciones creadas para departamento anterior (id={departamento_anterior_id})")
+                else:
+                    print(f"DEBUG NOTIFICATION: No se encontró departamento anterior para estado={estado_anterior}")
+            
+        except Exception as e:
+            logger.error(f"Error creando notificaciones de devolución: {str(e)}")
+            print(f"DEBUG NOTIFICATION ERROR: {str(e)}")
 
         return {
             'message': f'Solicitud devuelta para corrección por {user_name}',
@@ -1127,6 +2064,88 @@ class WorkflowService:
         
         # Crear historial de flujo
         self._create_history_record(mision, transicion, request_data, user, None)
+        
+        # Enviar notificación por email (asíncrono)
+        try:
+            import asyncio
+            from app.api.v1.missions import get_beneficiary_names
+            
+            # Preparar datos para la notificación
+            data = {
+                'numero_solicitud': mision.numero_solicitud,
+                'tipo': mision.tipo_mision.value,
+                'solicitante': get_beneficiary_names(self.db_rrhh, [mision.beneficiario_personal_id]).get(mision.beneficiario_personal_id, 'N/A'),
+                'fecha': mision.fecha_salida.strftime('%d/%m/%Y') if mision.fecha_salida else 'N/A',
+                'monto': f"${mision.monto_total_calculado:,.2f}",
+                'objetivo': mision.objetivo_mision or 'N/A',
+                'rechazador': user_name
+            }
+            
+            print(f"DEBUG EMAIL: Enviando notificación de rechazo para misión {mision.id_mision}")
+            print(f"DEBUG EMAIL: rechazador={user_name}")
+            
+            # Enviar notificación de rechazo al solicitante
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # Si ya hay un loop corriendo, crear una tarea
+                    asyncio.create_task(
+                        self._email_service.send_rejection_notification(
+                            to_email=self._email_service.get_solicitante_email(mision.id_mision, self.db_rrhh),
+                            data=data,
+                            db_rrhh=self.db_rrhh
+                        )
+                    )
+                else:
+                    # Si no hay loop corriendo, ejecutar directamente
+                    loop.run_until_complete(
+                        self._email_service.send_rejection_notification(
+                            to_email=self._email_service.get_solicitante_email(mision.id_mision, self.db_rrhh),
+                            data=data,
+                            db_rrhh=self.db_rrhh
+                        )
+                    )
+            except Exception as e:
+                print(f"DEBUG EMAIL ERROR en asyncio: {str(e)}")
+                # Fallback: intentar ejecutar de forma síncrona
+                try:
+                    import asyncio
+                    asyncio.run(
+                        self._email_service.send_rejection_notification(
+                            to_email=self._email_service.get_solicitante_email(mision.id_mision, self.db_rrhh),
+                            data=data,
+                            db_rrhh=self.db_rrhh
+                        )
+                    )
+                except Exception as e2:
+                    print(f"DEBUG EMAIL ERROR en fallback: {str(e2)}")
+            
+            print(f"DEBUG EMAIL: Tarea de notificación de rechazo creada exitosamente")
+            
+        except Exception as e:
+            logger.error(f"Error enviando notificación de rechazo: {str(e)}")
+            print(f"DEBUG EMAIL ERROR: {str(e)}")
+        
+        # Crear notificación para el solicitante sobre el rechazo definitivo
+        try:
+            print(f"DEBUG NOTIFICATION: Creando notificación de rechazo definitivo para solicitante")
+            titulo = f"Solicitud Rechazada - {mision.numero_solicitud}"
+            descripcion = f"Solicitud {mision.numero_solicitud} rechazada definitivamente por {user_name}"
+            
+            notification_data = NotificacionCreate(
+                titulo=titulo,
+                descripcion=descripcion,
+                personal_id=mision.beneficiario_personal_id,
+                id_mision=mision.id_mision,
+                visto=False
+            )
+            
+            self._notification_service.create_notification(notification_data)
+            print(f"DEBUG NOTIFICATION: Notificación de rechazo definitivo creada para solicitante")
+            
+        except Exception as e:
+            logger.error(f"Error creando notificación de rechazo definitivo: {str(e)}")
+            print(f"DEBUG NOTIFICATION ERROR: {str(e)}")
 
         return {
             'message': f'Solicitud rechazada definitivamente por {user_name}'
@@ -1423,11 +2442,14 @@ class WorkflowService:
         jefe_cedula = jefe.get('cedula')
         
         # Obtener los empleados bajo la supervisión del jefe
+        # Nueva lógica: jefe inmediato es quien tiene orden_aprobador = 1 en departamento_aprobadores_maestros
         result = self.db_rrhh.execute(text("""
             SELECT np.personal_id
             FROM aitsa_rrhh.nompersonal np
-            JOIN aitsa_rrhh.departamento d ON np.IdDepartamento = d.IdDepartamento
-            WHERE d.IdJefe = :jefe_cedula
+            JOIN aitsa_rrhh.departamento_aprobadores_maestros dam
+              ON dam.id_departamento = np.IdDepartamento
+             AND dam.orden_aprobador = 1
+            WHERE dam.cedula_aprobador = :jefe_cedula
         """), {"jefe_cedula": jefe_cedula})
         
         supervised_employees = [row.personal_id for row in result.fetchall()]
@@ -1446,12 +2468,49 @@ class WorkflowService:
     
     def _get_mission_with_validation(self, mission_id: int, user: Union[Usuario, dict]) -> Mision:
         """Obtiene una misión con validaciones de acceso"""
+        print(f"🔍 DEBUG _get_mission_with_validation: Buscando misión {mission_id}")
+        
+        # Primero intentar con joinedload
         mision = self.db.query(Mision).options(
             joinedload(Mision.estado_flujo)
         ).filter(Mision.id_mision == mission_id).first()
         
         if not mision:
             raise HTTPException(status_code=404, detail="Misión no encontrada")
+        
+        print(f"🔍 DEBUG _get_mission_with_validation: Misión encontrada - id_estado_flujo: {mision.id_estado_flujo}")
+        print(f"🔍 DEBUG _get_mission_with_validation: estado_flujo cargado: {mision.estado_flujo is not None}")
+        
+        # Verificar que el estado_flujo esté cargado correctamente
+        if not mision.estado_flujo:
+            print(f"🔍 DEBUG _get_mission_with_validation: Estado de flujo no cargado, intentando cargar manualmente")
+            # Intentar cargar el estado manualmente
+            estado_flujo = self.db.query(EstadoFlujo).filter(
+                EstadoFlujo.id_estado_flujo == mision.id_estado_flujo
+            ).first()
+            
+            if not estado_flujo:
+                print(f"🔍 ERROR _get_mission_with_validation: Estado de flujo no encontrado en BD para id_estado_flujo {mision.id_estado_flujo}")
+                raise WorkflowException(f"Estado de flujo no encontrado para misión {mission_id} con id_estado_flujo {mision.id_estado_flujo}")
+            
+            print(f"🔍 DEBUG _get_mission_with_validation: Estado de flujo cargado manualmente: {estado_flujo.nombre_estado}")
+            mision.estado_flujo = estado_flujo
+        else:
+            print(f"🔍 DEBUG _get_mission_with_validation: Estado de flujo ya cargado: {mision.estado_flujo.nombre_estado}")
+        
+        # Forzar refresh de la sesión para asegurar que la relación esté disponible
+        self.db.refresh(mision)
+        
+        # Verificar nuevamente después del refresh
+        if not mision.estado_flujo:
+            print(f"🔍 DEBUG _get_mission_with_validation: Estado de flujo sigue siendo None después del refresh, cargando manualmente")
+            estado_flujo = self.db.query(EstadoFlujo).filter(
+                EstadoFlujo.id_estado_flujo == mision.id_estado_flujo
+            ).first()
+            
+            if estado_flujo:
+                mision.estado_flujo = estado_flujo
+                print(f"🔍 DEBUG _get_mission_with_validation: Estado de flujo asignado manualmente después del refresh: {estado_flujo.nombre_estado}")
         
         # Validar acceso según permisos
         if not self._can_access_mission(mision, user):
@@ -1467,6 +2526,8 @@ class WorkflowService:
     ) -> TransicionFlujo:
         """Valida y obtiene la transición correspondiente basado en permisos"""
         # En lugar de usar transiciones de BD, validar basado en lógica de permisos
+        if not mision.estado_flujo:
+            raise WorkflowException(f"Estado de flujo no disponible para misión {mision.id_mision}")
         estado_actual = mision.estado_flujo.nombre_estado
         
         # Crear transición ficticia para compatibilidad
@@ -1476,6 +2537,7 @@ class WorkflowService:
         
         # Determinar estado destino basado en acción y estado actual
         estado_destino_id = self._determine_next_state(estado_actual, action, mision, user)
+        print(f"DEBUG TRANSITION: estado_actual={estado_actual}, action={action}, estado_destino_id={estado_destino_id}")
         transicion.id_estado_destino = estado_destino_id
         
         # Validar que el usuario tiene permisos para esta acción
@@ -1495,15 +2557,29 @@ class WorkflowService:
         elif action_upper == 'APROBAR':
             if estado_actual == 'PENDIENTE_JEFE':
                 print(f"DEBUG: tipo_mision={mision.tipo_mision} ({type(mision.tipo_mision)}), estado_actual={estado_actual}")
+                print(f"DEBUG: _states_cache keys disponibles: {list(self._states_cache.keys())}")
+                
                 if mision.tipo_mision == TipoMision.VIATICOS:
                     print("DEBUG: Transición a PENDIENTE_REVISION_TESORERIA")
-                    return self._states_cache['PENDIENTE_REVISION_TESORERIA'].id_estado_flujo
+                    if 'PENDIENTE_REVISION_TESORERIA' in self._states_cache:
+                        return self._states_cache['PENDIENTE_REVISION_TESORERIA'].id_estado_flujo
+                    else:
+                        print("ERROR: PENDIENTE_REVISION_TESORERIA no encontrado en caché")
+                        return mision.id_estado_flujo
                 elif mision.tipo_mision == TipoMision.CAJA_MENUDA:
                     print("DEBUG: Transición a APROBADO_PARA_PAGO")
-                    return self._states_cache['APROBADO_PARA_PAGO'].id_estado_flujo
+                    if 'APROBADO_PARA_PAGO' in self._states_cache:
+                        return self._states_cache['APROBADO_PARA_PAGO'].id_estado_flujo
+                    else:
+                        print("ERROR: APROBADO_PARA_PAGO no encontrado en caché")
+                        return mision.id_estado_flujo
                 else:
                     print("DEBUG: Transición por defecto a PENDIENTE_REVISION_TESORERIA")
-                    return self._states_cache['PENDIENTE_REVISION_TESORERIA'].id_estado_flujo
+                    if 'PENDIENTE_REVISION_TESORERIA' in self._states_cache:
+                        return self._states_cache['PENDIENTE_REVISION_TESORERIA'].id_estado_flujo
+                    else:
+                        print("ERROR: PENDIENTE_REVISION_TESORERIA no encontrado en caché")
+                        return mision.id_estado_flujo
             elif estado_actual == 'PENDIENTE_REVISION_TESORERIA':
                 if mision.tipo_mision == TipoMision.CAJA_MENUDA:
                     return self._states_cache['APROBADO_PARA_PAGO'].id_estado_flujo
@@ -1750,10 +2826,13 @@ class WorkflowService:
             raise BusinessException("No hay conexión con RRHH para validar supervisión")
         
         # Obtener información del empleado beneficiario
+        # Nueva validación: jefe válido es quien esté como orden_aprobador = 1 para el departamento del beneficiario
         result = self.db_rrhh.execute(text("""
-            SELECT np.IdDepartamento, d.IdJefe, np.apenom
+            SELECT np.IdDepartamento, dam.cedula_aprobador AS CedulaJefeInmediato, np.apenom
             FROM aitsa_rrhh.nompersonal np
-            JOIN aitsa_rrhh.departamento d ON np.IdDepartamento = d.IdDepartamento
+            JOIN aitsa_rrhh.departamento_aprobadores_maestros dam
+              ON dam.id_departamento = np.IdDepartamento
+             AND dam.orden_aprobador = 1
             WHERE np.personal_id = :personal_id
         """), {"personal_id": mision.beneficiario_personal_id})
         
@@ -1762,10 +2841,10 @@ class WorkflowService:
             raise BusinessException("No se encontró información del empleado beneficiario")
         
         jefe_cedula = jefe.get('cedula')
-        if employee_info.IdJefe != jefe_cedula:
+        if employee_info.CedulaJefeInmediato != jefe_cedula:
             raise PermissionException(
                 f"No tiene autorización para aprobar esta solicitud. "
-                f"El jefe autorizado es: {employee_info.IdJefe}"
+                f"El jefe autorizado es: {employee_info.CedulaJefeInmediato}"
             )
     
     def _validate_budget_items(self, partidas: List[PartidaPresupuestariaBase]):
@@ -1839,7 +2918,17 @@ class WorkflowService:
         client_ip: Optional[str]
     ):
         """Crea un registro en el historial de flujo"""
-        user_id = user.id_usuario if isinstance(user, Usuario) else 1  # Usuario sistema para empleados
+        # Para empleados (dict), usar personal_id; para usuarios financieros, usar id_usuario
+        if isinstance(user, Usuario):
+            user_id = user.id_usuario
+        elif isinstance(user, dict):
+            # Para jefes inmediatos, usar personal_id; para empleados normales, NULL
+            if self._is_jefe_inmediato(user):
+                user_id = user.get('personal_id')
+            else:
+                user_id = None
+        else:
+            user_id = None
         
         # Determinar qué usar como observación
         observacion = None
@@ -1850,6 +2939,14 @@ class WorkflowService:
         elif hasattr(request_data, 'motivo') and request_data.motivo:
             observacion = request_data.motivo
         
+        # Construir datos_adicionales, agregando cedula/nombre cuando es empleado
+        base_datos_adicionales = {}
+        if hasattr(request_data, 'datos_adicionales') and request_data.datos_adicionales:
+            base_datos_adicionales.update(request_data.datos_adicionales)
+        if isinstance(user, dict):
+            base_datos_adicionales.setdefault('usuario_cedula', user.get('cedula'))
+            base_datos_adicionales.setdefault('usuario_nombre', user.get('apenom'))
+
         historial = HistorialFlujo(
             id_mision=mision.id_mision,
             id_usuario_accion=user_id,
@@ -1858,7 +2955,7 @@ class WorkflowService:
             tipo_accion=transicion.tipo_accion,
             comentarios=request_data.comentarios,
             observacion=observacion,
-            datos_adicionales=request_data.datos_adicionales,
+            datos_adicionales=base_datos_adicionales or None,
             ip_usuario=client_ip
         )
         
@@ -1875,9 +2972,31 @@ class WorkflowService:
         
         motivo = getattr(request_data, 'motivo', 'Sin motivo especificado')
         observaciones = getattr(request_data, 'observaciones_correccion', None)
+        user_name = user.get("apenom", "Jefe Inmediato")
+        
+        # Crear notificación para el solicitante sobre la devolución
+        try:
+            print(f"DEBUG NOTIFICATION: Creando notificación de devolución por jefe para solicitante")
+            titulo = f"Solicitud Devuelta - {mision.numero_solicitud}"
+            descripcion = f"Solicitud {mision.numero_solicitud} devuelta para corrección por {user_name}"
+            
+            notification_data = NotificacionCreate(
+                titulo=titulo,
+                descripcion=descripcion,
+                personal_id=mision.beneficiario_personal_id,
+                id_mision=mision.id_mision,
+                visto=False
+            )
+            
+            self._notification_service.create_notification(notification_data)
+            print(f"DEBUG NOTIFICATION: Notificación de devolución por jefe creada para solicitante")
+            
+        except Exception as e:
+            logger.error(f"Error creando notificación de devolución por jefe: {str(e)}")
+            print(f"DEBUG NOTIFICATION ERROR: {str(e)}")
         
         return {
-            'message': f'Solicitud devuelta para corrección por {user.get("apenom", "Jefe Inmediato")}',
+            'message': f'Solicitud devuelta para corrección por {user_name}',
             'requiere_accion_adicional': True,
             'datos_adicionales': {
                 'motivo': motivo,
@@ -1905,9 +3024,33 @@ class WorkflowService:
         
         justificacion = getattr(request_data, 'justificacion', 'Aprobación directa por jefe inmediato')
         es_emergencia = getattr(request_data, 'es_emergencia', False)
+        user_name = user.get("apenom", "Jefe Inmediato")
+        
+        # Crear notificación para el solicitante sobre la aprobación directa
+        try:
+            print(f"DEBUG NOTIFICATION: Creando notificación de aprobación directa por jefe para solicitante")
+            titulo = f"Solicitud Aprobada - {mision.numero_solicitud}"
+            descripcion = f"Solicitud {mision.numero_solicitud} aprobada directamente por {user_name}"
+            if es_emergencia:
+                descripcion += " (Emergencia)"
+            
+            notification_data = NotificacionCreate(
+                titulo=titulo,
+                descripcion=descripcion,
+                personal_id=mision.beneficiario_personal_id,
+                id_mision=mision.id_mision,
+                visto=False
+            )
+            
+            self._notification_service.create_notification(notification_data)
+            print(f"DEBUG NOTIFICATION: Notificación de aprobación directa por jefe creada para solicitante")
+            
+        except Exception as e:
+            logger.error(f"Error creando notificación de aprobación directa por jefe: {str(e)}")
+            print(f"DEBUG NOTIFICATION ERROR: {str(e)}")
         
         return {
-            'message': f'Solicitud aprobada directamente para pago por {user.get("apenom", "Jefe Inmediato")}',
+            'message': f'Solicitud aprobada directamente para pago por {user_name}',
             'datos_adicionales': {
                 'justificacion': justificacion,
                 'es_emergencia': es_emergencia,
@@ -1929,7 +3072,17 @@ class WorkflowService:
         client_ip: Optional[str]
     ):
         """Crea un registro manual en el historial"""
-        user_id = user.id_usuario if isinstance(user, Usuario) else 1
+        # Para empleados (dict), usar personal_id; para usuarios financieros, usar id_usuario
+        if isinstance(user, Usuario):
+            user_id = user.id_usuario
+        elif isinstance(user, dict):
+            # Para jefes inmediatos, usar personal_id; para empleados normales, NULL
+            if self._is_jefe_inmediato(user):
+                user_id = user.get('personal_id')
+            else:
+                user_id = None
+        else:
+            user_id = None
         
         # Determinar qué usar como observación
         observacion = None
@@ -1940,6 +3093,12 @@ class WorkflowService:
         elif hasattr(request_data, 'motivo') and request_data.motivo:
             observacion = request_data.motivo
         
+        # Construir datos_adicionales, agregando cedula/nombre cuando es empleado
+        base_datos_adicionales = getattr(request_data, 'datos_adicionales', None) or {}
+        if isinstance(user, dict):
+            base_datos_adicionales.setdefault('usuario_cedula', user.get('cedula'))
+            base_datos_adicionales.setdefault('usuario_nombre', user.get('apenom'))
+
         historial = HistorialFlujo(
             id_mision=mision.id_mision,
             id_usuario_accion=user_id,
@@ -1948,7 +3107,7 @@ class WorkflowService:
             tipo_accion=accion,
             comentarios=getattr(request_data, 'comentarios', None),
             observacion=observacion,
-            datos_adicionales=getattr(request_data, 'datos_adicionales', None),
+            datos_adicionales=base_datos_adicionales or None,
             ip_usuario=client_ip
         )
         
@@ -2028,3 +3187,223 @@ class WorkflowService:
                 'personal_id': personal_id
             }
         }
+
+    def get_user_participations(
+        self, 
+        user: Union[Usuario, dict], 
+        filters: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Obtiene todas las solicitudes en las que ha participado un usuario
+        (aprobado, rechazado, devuelto, etc.) - agrupadas por misión para evitar duplicados
+        """
+        # Determinar el ID del usuario
+        if isinstance(user, dict):
+            # Para empleados, usar personal_id
+            user_id = user.get('personal_id')
+            if not user_id:
+                return {
+                    'items': [],
+                    'total': 0,
+                    'page': filters.get('page', 1),
+                    'size': filters.get('size', 20),
+                    'pages': 0,
+                    'stats': {'total_solicitudes': 0, 'por_tipo': {}}
+                }
+        else:
+            # Para usuarios financieros, usar id_usuario
+            user_id = user.id_usuario
+            if not user_id:
+                return {
+                    'items': [],
+                    'total': 0,
+                    'page': filters.get('page', 1),
+                    'size': filters.get('size', 20),
+                    'pages': 0,
+                    'stats': {'total_solicitudes': 0, 'por_tipo': {}}
+                }
+
+        # Construir la consulta base con todas las relaciones
+        query = self.db.query(Mision).options(
+            joinedload(Mision.estado_flujo),
+            joinedload(Mision.items_viaticos),
+            joinedload(Mision.items_transporte),
+            joinedload(Mision.partidas_presupuestarias),
+            joinedload(Mision.items_misiones_exterior),
+            joinedload(Mision.items_viaticos_completos),
+            joinedload(Mision.misiones_caja_menuda)
+        ).join(
+            HistorialFlujo, Mision.id_mision == HistorialFlujo.id_mision
+        ).join(
+            EstadoFlujo, Mision.id_estado_flujo == EstadoFlujo.id_estado_flujo
+        ).filter(
+            HistorialFlujo.id_usuario_accion == user_id
+        ).group_by(
+            Mision.id_mision
+        )
+
+        # Aplicar filtros
+        if filters.get('search'):
+            search_term = f"%{filters['search']}%"
+            query = query.filter(
+                or_(
+                    Mision.objetivo_mision.ilike(search_term),
+                    Mision.destino_mision.ilike(search_term),
+                    Mision.numero_solicitud.ilike(search_term)
+                )
+            )
+
+        if filters.get('estado'):
+            query = query.filter(EstadoFlujo.nombre_estado == filters['estado'])
+
+        if filters.get('tipo_mision'):
+            tipo_enum = TipoMision(filters['tipo_mision']) if isinstance(filters['tipo_mision'], str) else filters['tipo_mision']
+            query = query.filter(Mision.tipo_mision == tipo_enum)
+
+        if filters.get('fecha_desde'):
+            query = query.filter(Mision.created_at >= filters['fecha_desde'])
+
+        if filters.get('fecha_hasta'):
+            query = query.filter(Mision.created_at <= filters['fecha_hasta'])
+
+        # Ordenar por fecha de creación (más recientes primero)
+        query = query.order_by(Mision.created_at.desc())
+
+        # Obtener total para paginación
+        total_count = query.count()
+
+        # Aplicar paginación
+        page = filters.get('page', 1)
+        size = filters.get('size', 20)
+        offset = (page - 1) * size
+
+        missions = query.offset(offset).limit(size).all()
+
+        # Calcular estadísticas
+        stats = {
+            'total_solicitudes': total_count,
+            'por_tipo': {}
+        }
+
+        # Contar por tipo de misión
+        for mission in missions:
+            tipo = mission.tipo_mision.value if hasattr(mission.tipo_mision, 'value') else str(mission.tipo_mision)
+            stats['por_tipo'][tipo] = stats['por_tipo'].get(tipo, 0) + 1
+
+        return {
+            'items': missions,
+            'total': total_count,
+            'page': page,
+            'size': size,
+            'pages': (total_count + size - 1) // size,
+            'stats': stats
+        }
+
+    def _get_jefe_inmediato_personal_id(self, beneficiary_personal_id: int) -> Optional[int]:
+        """
+        Obtiene el personal_id del jefe inmediato de un beneficiario.
+        
+        Args:
+            beneficiary_personal_id: ID del personal del beneficiario
+            
+        Returns:
+            personal_id del jefe inmediato o None si no se encuentra
+        """
+        try:
+            if not self.db_rrhh:
+                logger.error("No hay conexión a la base de datos RRHH")
+                return None
+            
+            # Primero obtener la cédula del beneficiario
+            beneficiary_result = self.db_rrhh.execute(
+                text("""
+                    SELECT cedula, IdDepartamento
+                    FROM aitsa_rrhh.nompersonal
+                    WHERE personal_id = :personal_id
+                """),
+                {"personal_id": beneficiary_personal_id}
+            ).fetchone()
+            
+            if not beneficiary_result:
+                logger.error(f"No se encontró beneficiario con personal_id {beneficiary_personal_id}")
+                return None
+            
+            beneficiary_cedula = beneficiary_result.cedula
+            beneficiary_department = beneficiary_result.IdDepartamento
+            
+            # Buscar el jefe inmediato (orden_aprobador = 1) del departamento del beneficiario
+            jefe_result = self.db_rrhh.execute(
+                text("""
+                    SELECT dam.cedula_aprobador
+                    FROM aitsa_rrhh.departamento_aprobadores_maestros dam
+                    WHERE dam.id_departamento = :departamento
+                      AND dam.orden_aprobador = 1
+                    LIMIT 1
+                """),
+                {"departamento": beneficiary_department}
+            ).fetchone()
+            
+            if not jefe_result:
+                logger.error(f"No se encontró jefe inmediato para departamento {beneficiary_department}")
+                return None
+            
+            jefe_cedula = jefe_result.cedula_aprobador
+            
+            # Obtener el personal_id del jefe usando su cédula
+            jefe_personal_result = self.db_rrhh.execute(
+                text("""
+                    SELECT personal_id
+                    FROM aitsa_rrhh.nompersonal
+                    WHERE cedula = :cedula
+                """),
+                {"cedula": jefe_cedula}
+            ).fetchone()
+            
+            if jefe_personal_result:
+                return jefe_personal_result.personal_id
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error obteniendo jefe inmediato para personal_id {beneficiary_personal_id}: {str(e)}")
+            return None
+
+    def _get_previous_department_id(self, estado_actual: str) -> Optional[int]:
+        """
+        Obtiene el ID del departamento anterior basado en el estado actual.
+        
+        Args:
+            estado_actual: Nombre del estado actual
+            
+        Returns:
+            ID del departamento anterior o None si no se encuentra
+        """
+        try:
+            # Mapeo de estados a departamentos anteriores (lógica inversa del workflow)
+            # Los IDs están hardcodeados según la estructura de la base de datos
+            estado_to_previous_dept = {
+                "PENDIENTE_JEFE": None,  # No hay departamento anterior
+                "PENDIENTE_REVISION_TESORERIA": None,  # Jefe inmediato (no es departamento financiero)
+                "PENDIENTE_ASIGNACION_PRESUPUESTO": 1,  # Tesorería
+                "PENDIENTE_CONTABILIDAD": 3,  # Presupuesto
+                "PENDIENTE_APROBACION_FINANZAS": 2,  # Contabilidad
+                "PENDIENTE_REFRENDO_CGR": 7,  # Vicepresidencia de finanzas
+                "APROBADO_PARA_PAGO": 4,  # CGR
+                "PENDIENTE_FIRMA_ELECTRONICA": 4,  # CGR
+                "PAGADO": 5,  # Cajas
+                "DEVUELTO_CORRECCION": None,  # No aplica
+                "DEVUELTO_CORRECCION_JEFE": None,  # No aplica
+                "DEVUELTO_CORRECCION_TESORERIA": None,  # Jefe inmediato
+                "DEVUELTO_CORRECCION_PRESUPUESTO": 1,  # Tesorería
+                "DEVUELTO_CORRECCION_CONTABILIDAD": 3,  # Presupuesto
+                "DEVUELTO_CORRECCION_FINANZAS": 2,  # Contabilidad
+                "DEVUELTO_CORRECCION_CGR": 7,  # Vicepresidencia de finanzas
+                "RECHAZADO": None,  # No aplica
+            }
+            
+            return estado_to_previous_dept.get(estado_actual)
+            
+        except Exception as e:
+            logger.error(f"Error obteniendo departamento anterior para estado {estado_actual}: {str(e)}")
+            return None
+
