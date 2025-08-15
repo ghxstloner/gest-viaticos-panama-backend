@@ -249,6 +249,89 @@ class ReportService:
         
         return self._generate_complete_excel_report(missions)
 
+    def generate_complete_solicitudes_data(
+        self,
+        tipo_mision: Optional[str] = None,
+        estado: Optional[str] = None,
+        fecha_desde: Optional[str] = None,
+        fecha_hasta: Optional[str] = None,
+        fecha_salida: Optional[str] = None,
+        fecha_retorno: Optional[str] = None,
+        monto_min: Optional[float] = None,
+        monto_max: Optional[float] = None
+    ) -> List[Dict[str, Any]]:
+        """Construye en memoria la misma información del reporte completo pero en formato JSON."""
+        # Query base con las relaciones necesarias
+        query = self.db.query(Mision).options(
+            joinedload(Mision.estado_flujo),
+            joinedload(Mision.usuario_prepara),
+            joinedload(Mision.historial_flujo).joinedload(HistorialFlujo.usuario_accion),
+            joinedload(Mision.historial_flujo).joinedload(HistorialFlujo.estado_nuevo)
+        )
+
+        # Aplicar filtros
+        if estado:
+            query = query.join(EstadoFlujo).filter(EstadoFlujo.nombre_estado == estado)
+
+        if tipo_mision:
+            tipo_enum = TipoMision(tipo_mision) if isinstance(tipo_mision, str) else tipo_mision
+            query = query.filter(Mision.tipo_mision == tipo_enum)
+
+        if fecha_desde:
+            query = query.filter(Mision.created_at >= fecha_desde)
+
+        if fecha_hasta:
+            query = query.filter(Mision.created_at <= fecha_hasta)
+
+        if fecha_salida:
+            query = query.filter(Mision.fecha_salida == fecha_salida)
+
+        if fecha_retorno:
+            query = query.filter(Mision.fecha_retorno == fecha_retorno)
+
+        if monto_min:
+            query = query.filter(Mision.monto_total_calculado >= monto_min)
+
+        if monto_max:
+            query = query.filter(Mision.monto_total_calculado <= monto_max)
+
+        missions = query.order_by(Mision.created_at.desc()).all()
+
+        data: List[Dict[str, Any]] = []
+        for mission in missions:
+            aprobadores = self._get_approval_users_separated(mission)
+
+            estado_nombre = mission.estado_flujo.nombre_estado if mission.estado_flujo else ''
+            estado_limpio = estado_nombre.replace('_', ' ') if estado_nombre else ''
+
+            tipo_limpio = mission.tipo_mision.value.replace('_', ' ') if mission.tipo_mision and mission.tipo_mision.value else ''
+
+            categoria_limpia = mission.categoria_beneficiario.replace('_', ' ') if getattr(mission, 'categoria_beneficiario', None) else ''
+
+            data.append({
+                "numero_solicitud": mission.numero_solicitud or f"MISION-{mission.id_mision}",
+                "tipo": tipo_limpio,
+                "nombre_solicitante": self._get_beneficiary_name(mission.beneficiario_personal_id),
+                "categoria_beneficiario": categoria_limpia,
+                "objetivo_mision": mission.objetivo_mision,
+                "destino_mision": mission.destino_mision,
+                "tipo_viaje": mission.tipo_viaje.value if getattr(mission, 'tipo_viaje', None) else '',
+                "region_exterior": mission.region_exterior if getattr(mission, 'tipo_viaje', None) and mission.tipo_viaje.value == "INTERNACIONAL" else "",
+                "fecha_salida": mission.fecha_salida,
+                "fecha_retorno": mission.fecha_retorno,
+                "fecha_creacion": mission.created_at,
+                "estado": estado_limpio,
+                "monto_total": float(mission.monto_total_calculado),
+                "monto_aprobado": float(mission.monto_aprobado) if mission.monto_aprobado else 0.0,
+                "aprobado_por_jefe": aprobadores.get('jefe', '') or 'Sin aprobar',
+                "aprobado_por_tesoreria": aprobadores.get('tesoreria', '') or 'Sin aprobar',
+                "aprobado_por_presupuesto": aprobadores.get('presupuesto', '') or 'Sin aprobar',
+                "aprobado_por_contabilidad": aprobadores.get('contabilidad', '') or 'Sin aprobar',
+                "aprobado_por_finanzas": aprobadores.get('finanzas', '') or 'Sin aprobar'
+            })
+
+        return data
+
     def _apply_user_filter(self, user: Usuario, model_class):
         """Aplicar filtros basados en el rol del usuario"""
         if user.rol.nombre_rol == "Administrador Sistema":
@@ -367,6 +450,7 @@ class ReportService:
             'Región del Exterior',
             'Fecha de Salida',
             'Fecha de Retorno',
+            'Fecha de Creación',
             'Estado',
             'Monto Total',
             'Monto Aprobado',
@@ -432,25 +516,28 @@ class ReportService:
             # Fecha de retorno
             worksheet.write(row, 9, mission.fecha_retorno, date_format)
             
+            # Fecha de creación
+            worksheet.write(row, 10, mission.created_at, date_format)
+
             # Estado (quitar guiones bajos)
             estado_nombre = mission.estado_flujo.nombre_estado if mission.estado_flujo else ''
             estado_limpio = estado_nombre.replace('_', ' ') if estado_nombre else ''
-            worksheet.write(row, 10, estado_limpio, text_format)
+            worksheet.write(row, 11, estado_limpio, text_format)
             
             # Monto total
-            worksheet.write(row, 11, float(mission.monto_total_calculado), money_format)
+            worksheet.write(row, 12, float(mission.monto_total_calculado), money_format)
             
             # Monto aprobado
             monto_aprobado = float(mission.monto_aprobado) if mission.monto_aprobado else 0.0
-            worksheet.write(row, 12, monto_aprobado, money_format)
+            worksheet.write(row, 13, monto_aprobado, money_format)
              
             # Usuarios que aprobaron (columnas separadas)
             aprobadores = self._get_approval_users_separated(mission)
-            worksheet.write(row, 13, aprobadores.get('jefe', '') or 'Sin aprobar', text_format)
-            worksheet.write(row, 14, aprobadores.get('tesoreria', '') or 'Sin aprobar', text_format)
-            worksheet.write(row, 15, aprobadores.get('presupuesto', '') or 'Sin aprobar', text_format)
-            worksheet.write(row, 16, aprobadores.get('contabilidad', '') or 'Sin aprobar', text_format)
-            worksheet.write(row, 17, aprobadores.get('finanzas', '') or 'Sin aprobar', text_format)
+            worksheet.write(row, 14, aprobadores.get('jefe', '') or 'Sin aprobar', text_format)
+            worksheet.write(row, 15, aprobadores.get('tesoreria', '') or 'Sin aprobar', text_format)
+            worksheet.write(row, 16, aprobadores.get('presupuesto', '') or 'Sin aprobar', text_format)
+            worksheet.write(row, 17, aprobadores.get('contabilidad', '') or 'Sin aprobar', text_format)
+            worksheet.write(row, 18, aprobadores.get('finanzas', '') or 'Sin aprobar', text_format)
         
         # Ajustar anchos de columna
         worksheet.set_column('A:A', 20)  # Número de solicitud
@@ -461,10 +548,10 @@ class ReportService:
         worksheet.set_column('F:F', 30)  # Destino de la misión
         worksheet.set_column('G:G', 15)  # Tipo de viaje
         worksheet.set_column('H:H', 20)  # Región del exterior
-        worksheet.set_column('I:J', 15)  # Fechas
-        worksheet.set_column('K:K', 15)  # Estado
-        worksheet.set_column('L:M', 15)  # Montos
-        worksheet.set_column('N:R', 20)  # Aprobadores separados
+        worksheet.set_column('I:K', 15)  # Fechas (incluye creación)
+        worksheet.set_column('L:L', 15)  # Estado
+        worksheet.set_column('M:N', 15)  # Montos
+        worksheet.set_column('O:S', 20)  # Aprobadores separados
         
         workbook.close()
         output.seek(0)

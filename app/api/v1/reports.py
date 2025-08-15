@@ -111,6 +111,43 @@ async def generate_missions_excel_report(
     )
 
 
+@router.get("/solicitudes-completas")
+async def get_complete_solicitudes_json(
+    tipo_mision: Optional[str] = Query(None, description="Filtrar por tipo de misión"),
+    estado: Optional[str] = Query(None, description="Filtrar por nombre de estado de flujo"),
+    fecha_desde: Optional[str] = Query(None, description="Filtrar desde esta fecha (YYYY-MM-DD)"),
+    fecha_hasta: Optional[str] = Query(None, description="Filtrar hasta esta fecha (YYYY-MM-DD)"),
+    fecha_salida: Optional[str] = Query(None, description="Filtrar por fecha de salida (YYYY-MM-DD)"),
+    fecha_retorno: Optional[str] = Query(None, description="Filtrar por fecha de retorno (YYYY-MM-DD)"),
+    monto_min: Optional[float] = Query(None, description="Monto mínimo"),
+    monto_max: Optional[float] = Query(None, description="Monto máximo"),
+    db: Session = Depends(get_db_financiero),
+    current_user = Depends(get_current_user_universal)
+):
+    """Obtener en JSON el reporte completo de todas las solicitudes con los mismos filtros del Excel."""
+    # Verificar permisos específicos para este reporte
+    if not has_permission(current_user, "REPORT_ALL"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tiene permisos para ver el reporte de todas las solicitudes"
+        )
+
+    report_service = ReportService(db, current_user)
+
+    data = report_service.generate_complete_solicitudes_data(
+        tipo_mision=tipo_mision,
+        estado=estado,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        fecha_salida=fecha_salida,
+        fecha_retorno=fecha_retorno,
+        monto_min=monto_min,
+        monto_max=monto_max
+    )
+
+    return {"results": data, "count": len(data)}
+
+
 @router.get("/missions/pdf")
 async def generate_missions_pdf_report(
     fecha_desde: Optional[date] = Query(None),
