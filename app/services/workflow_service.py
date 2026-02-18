@@ -324,15 +324,9 @@ class WorkflowService:
                 acciones_disponibles.extend([
                     {
                         "accion": "APROBAR",
-                        "estado_destino": "PENDIENTE_REVISION_TESORERIA",
-                        "descripcion": "Aprobar solicitud",
+                        "estado_destino": "PENDIENTE_APROBACION_FINANZAS",
+                        "descripcion": "Aprobar y enviar a Vicepresidencia de Finanzas",
                         "requiere_datos_adicionales": False
-                    },
-                    {
-                        "accion": "APROBAR_DIRECTO",
-                        "estado_destino": "APROBADO_PARA_PAGO",
-                        "descripcion": "Aprobar directamente para pago",
-                        "requiere_datos_adicionales": True
                     },
                     {
                         "accion": "RECHAZAR",
@@ -390,20 +384,20 @@ class WorkflowService:
                 acciones_disponibles.extend([
                     {
                         "accion": "APROBAR",
-                        "estado_destino": "PENDIENTE_REVISION_TESORERIA",
-                        "descripcion": "Aprobar solicitud corregida",
+                        "estado_destino": "PENDIENTE_APROBACION_FINANZAS",
+                        "descripcion": "Aprobar y enviar a Vicepresidencia de Finanzas",
                         "requiere_datos_adicionales": False
-                    },
-                    {
-                        "accion": "APROBAR_DIRECTO",
-                        "estado_destino": "APROBADO_PARA_PAGO",
-                        "descripcion": "Aprobar directamente para pago",
-                        "requiere_datos_adicionales": True
                     },
                     {
                         "accion": "RECHAZAR",
                         "estado_destino": "RECHAZADO",
                         "descripcion": "Rechazar solicitud corregida",
+                        "requiere_datos_adicionales": True
+                    },
+                    {
+                        "accion": "DEVOLVER",
+                        "estado_destino": "DEVUELTO_CORRECCION",
+                        "descripcion": "Devolver para nueva corrección",
                         "requiere_datos_adicionales": True
                     }
                 ])
@@ -439,8 +433,8 @@ class WorkflowService:
                 acciones_disponibles.extend([
                     {
                         "accion": "APROBAR",
-                        "estado_destino": "PENDIENTE_CONTABILIDAD",
-                        "descripcion": "Asignar presupuesto y aprobar - Corregido",
+                        "estado_destino": "APROBADO_PARA_PAGO",
+                        "descripcion": "Asignar presupuesto y aprobar para pago - Corregido",
                         "requiere_datos_adicionales": True  # Requiere partidas
                     },
                     {
@@ -469,14 +463,23 @@ class WorkflowService:
                 ])
         
         elif estado_actual == 'DEVUELTO_CORRECCION_FINANZAS':
-            if self._can_approve_missions(user):  # Director de Finanzas
-                acciones_disponibles.extend([
-                    {
+            if self._can_approve_missions(user):  # Vicepresidente de Finanzas
+                if mision.tipo_mision == TipoMision.CAJA_MENUDA:
+                    acciones_disponibles.append({
                         "accion": "APROBAR",
-                        "estado_destino": "APROBADO_PARA_PAGO",  # O CGR si monto alto
-                        "descripcion": "Aprobación final de finanzas - Corregido",
-                        "requiere_datos_adicionales": True  # Puede requerir monto
-                    },
+                        "estado_destino": "APROBADO_PARA_PAGO",
+                        "descripcion": "Aprobar para pago (Caja Menuda) - Corregido",
+                        "requiere_datos_adicionales": True
+                    })
+                else:
+                    acciones_disponibles.append({
+                        "accion": "APROBAR",
+                        "estado_destino": "PENDIENTE_REVISION_TESORERIA",
+                        "descripcion": "Aprobar y enviar a Tesorería - Corregido",
+                        "requiere_datos_adicionales": False
+                    })
+                
+                acciones_disponibles.extend([
                     {
                         "accion": "RECHAZAR",
                         "estado_destino": "RECHAZADO",
@@ -507,8 +510,8 @@ class WorkflowService:
                 acciones_disponibles.extend([
                     {
                         "accion": "APROBAR",
-                        "estado_destino": "PENDIENTE_CONTABILIDAD",
-                        "descripcion": "Asignar presupuesto y aprobar",
+                        "estado_destino": "APROBADO_PARA_PAGO",
+                        "descripcion": "Asignar presupuesto y aprobar para pago",
                         "requiere_datos_adicionales": True  # Requiere partidas
                     },
                     {
@@ -518,15 +521,6 @@ class WorkflowService:
                         "requiere_datos_adicionales": True
                     }
                 ])
-                
-                # Agregar acción de devolver si tiene permisos
-                if self._can_return_missions(user):
-                    acciones_disponibles.append({
-                        "accion": "DEVOLVER",
-                        "estado_destino": "DEVUELTO_CORRECCION_TESORERIA",
-                        "descripcion": "Devolver para corrección a tesorería",
-                        "requiere_datos_adicionales": True
-                    })
         
         elif estado_actual == 'PENDIENTE_CONTABILIDAD':
             if self._can_view_contabilidad(user) and self._can_approve_missions(user):
@@ -555,14 +549,25 @@ class WorkflowService:
                     })
         
         elif estado_actual == 'PENDIENTE_APROBACION_FINANZAS':
-            if self._can_approve_missions(user):  # Director de Finanzas
-                acciones_disponibles.extend([
-                    {
+            if self._can_approve_missions(user):  # Vicepresidente de Finanzas
+                if mision.tipo_mision == TipoMision.CAJA_MENUDA:
+                    # Caja menuda va directo a aprobado para pago
+                    acciones_disponibles.append({
                         "accion": "APROBAR",
-                        "estado_destino": "APROBADO_PARA_PAGO",  # O CGR si monto alto
-                        "descripcion": "Aprobación final de finanzas",
-                        "requiere_datos_adicionales": True  # Puede requerir monto
-                    },
+                        "estado_destino": "APROBADO_PARA_PAGO",
+                        "descripcion": "Aprobar para pago (Caja Menuda)",
+                        "requiere_datos_adicionales": True
+                    })
+                else:
+                    # Viáticos va a Tesorería
+                    acciones_disponibles.append({
+                        "accion": "APROBAR",
+                        "estado_destino": "PENDIENTE_REVISION_TESORERIA",
+                        "descripcion": "Aprobar y enviar a Tesorería",
+                        "requiere_datos_adicionales": False
+                    })
+                
+                acciones_disponibles.extend([
                     {
                         "accion": "RECHAZAR",
                         "estado_destino": "RECHAZADO",
@@ -575,8 +580,8 @@ class WorkflowService:
                 if self._can_return_missions(user):
                     acciones_disponibles.append({
                         "accion": "DEVOLVER",
-                        "estado_destino": "DEVUELTO_CORRECCION_CONTABILIDAD",
-                        "descripcion": "Devolver para corrección a contabilidad",
+                        "estado_destino": "DEVUELTO_CORRECCION_JEFE",
+                        "descripcion": "Devolver para corrección al jefe",
                         "requiere_datos_adicionales": True
                     })
         
@@ -1281,6 +1286,37 @@ class WorkflowService:
         # Las partidas presupuestarias solo distribuyen el monto existente
         # El monto_total_calculado debe permanecer igual
         
+        # NUEVO FLUJO: Evaluar si requiere refrendo CGR basado en el monto
+        monto_refrendo_cgr = self._get_system_configuration('MONTO_REFRENDO_CGR', Decimal('5000.00'))
+        if isinstance(monto_refrendo_cgr, str):
+            monto_refrendo_cgr = Decimal(monto_refrendo_cgr)
+        
+        requiere_cgr = mision.monto_total_calculado >= monto_refrendo_cgr
+        mision.requiere_refrendo_cgr = requiere_cgr
+        
+        # Determinar el estado destino según el monto
+        if requiere_cgr:
+            # Si requiere CGR, cambiar a estado de refrendo
+            estado_cgr = self._states_cache.get('PENDIENTE_REFRENDO_CGR')
+            if estado_cgr:
+                transicion.id_estado_destino = estado_cgr.id_estado_flujo
+                # Actualizar el estado nuevo
+                estado_nuevo_obj = estado_cgr
+                estado_nuevo = estado_cgr.nombre_estado
+            mensaje_cgr = f"Partidas asignadas - Enviada a refrendo CGR (monto: ${mision.monto_total_calculado} >= ${monto_refrendo_cgr})"
+        else:
+            # Si no requiere CGR, va directo a aprobado para pago
+            estado_pago = self._states_cache.get('APROBADO_PARA_PAGO')
+            if estado_pago:
+                transicion.id_estado_destino = estado_pago.id_estado_flujo
+                # Actualizar el estado nuevo
+                estado_nuevo_obj = estado_pago
+                estado_nuevo = estado_pago.nombre_estado
+            mensaje_cgr = f"Partidas asignadas - Aprobada para pago (monto: ${mision.monto_total_calculado} < ${monto_refrendo_cgr})"
+        
+        # Actualizar el estado de la misión
+        mision.id_estado_flujo = transicion.id_estado_destino
+        
         # Crear historial de flujo
         self._create_history_record(mision, transicion, request_data, user, None)
         
@@ -1353,13 +1389,15 @@ class WorkflowService:
             print(f"DEBUG NOTIFICATION ERROR: {str(e)}")
         
         return {
-            'message': f'Partidas presupuestarias asignadas. Total distribuido: B/. {total_asignado} en {len(request_data.partidas)} partidas',
+            'message': f'{mensaje_cgr}. Total distribuido: B/. {total_asignado} en {len(request_data.partidas)} partidas',
             'datos_adicionales': {
                 'total_asignado': float(total_asignado),
                 'monto_partidas_eliminadas': float(monto_partidas_existentes),
                 'monto_total_mision': float(mision.monto_total_calculado),
                 'cantidad_partidas': len(request_data.partidas),
-                'analista_presupuesto': user_name
+                'analista_presupuesto': user_name,
+                'requiere_refrendo_cgr': mision.requiere_refrendo_cgr,
+                'monto_refrendo_cgr': float(monto_refrendo_cgr) if 'monto_refrendo_cgr' in locals() else None
             }
         }
     
@@ -1484,7 +1522,7 @@ class WorkflowService:
         request_data: FinanzasApprovalRequest,
         user: Union[Usuario, dict]
     ) -> Dict[str, Any]:
-        """Procesa aprobación final de finanzas"""
+        """Procesa aprobación del Vicepresidente de Finanzas"""
         # Registrar el ID del usuario que aprueba en finanzas
         if isinstance(user, Usuario):
             mision.id_finanzas = user.id_usuario
@@ -1496,30 +1534,22 @@ class WorkflowService:
             # Si no se especifica, usar el monto calculado
             mision.monto_aprobado = mision.monto_total_calculado
         
-        # Obtener configuración del monto para refrendo CGR
-        monto_refrendo_cgr = self._get_system_configuration('MONTO_REFRENDO_CGR', Decimal('5000.00'))
-        if isinstance(monto_refrendo_cgr, str):
-            monto_refrendo_cgr = Decimal(monto_refrendo_cgr)
-        
-        # Determinar si requiere refrendo CGR basado en el monto
-        requiere_cgr = mision.monto_aprobado >= monto_refrendo_cgr
-        
-        # Actualizar el campo en la misión
-        mision.requiere_refrendo_cgr = requiere_cgr
-        
-        # Determinar próximo estado basado en si requiere CGR
-        if requiere_cgr:
-            # Si requiere CGR, cambiar a estado de refrendo
-            estado_cgr = self._states_cache.get('PENDIENTE_REFRENDO_CGR')
-            if estado_cgr:
-                transicion.id_estado_destino = estado_cgr.id_estado_flujo
-            mensaje = f"Solicitud aprobada por Director Finanzas - Enviada a refrendo CGR (monto: ${mision.monto_aprobado} >= ${monto_refrendo_cgr})"
-        else:
-            # Si no requiere CGR, ir directo a aprobado para pago
+        # NUEVO FLUJO: VP Finanzas decide el siguiente paso según el tipo
+        if mision.tipo_mision == TipoMision.CAJA_MENUDA:
+            # Caja Menuda: VP Finanzas -> APROBADO_PARA_PAGO
             estado_pago = self._states_cache.get('APROBADO_PARA_PAGO')
             if estado_pago:
                 transicion.id_estado_destino = estado_pago.id_estado_flujo
-            mensaje = f"Solicitud aprobada por Director Finanzas - Aprobada para pago (monto: ${mision.monto_aprobado} < ${monto_refrendo_cgr})"
+            mensaje = f"Solicitud aprobada por Vicepresidente de Finanzas - Enviada a pago (Caja Menuda)"
+            requiere_cgr = False
+        else:
+            # Viáticos: VP Finanzas -> PENDIENTE_REVISION_TESORERIA
+            estado_tesoreria = self._states_cache.get('PENDIENTE_REVISION_TESORERIA')
+            if estado_tesoreria:
+                transicion.id_estado_destino = estado_tesoreria.id_estado_flujo
+            mensaje = f"Solicitud aprobada por Vicepresidente de Finanzas - Enviada a Tesorería"
+            # El CGR se evaluará más adelante en el flujo
+            requiere_cgr = False
         
         if not mision.estado_flujo:
             raise WorkflowException(f"Estado de flujo no disponible para misión {mision.id_mision}")
@@ -1542,9 +1572,9 @@ class WorkflowService:
         
         # Determinar nombre del usuario
         if isinstance(user, dict):
-            user_name = user.get('apenom', 'Director Finanzas')
+            user_name = user.get('apenom', 'Vicepresidente Finanzas')
         else:
-            user_name = user.login_username if hasattr(user, 'login_username') else "Director Finanzas"
+            user_name = user.login_username if hasattr(user, 'login_username') else "Vicepresidente Finanzas"
         
         # Enviar notificación por email (asíncrono)
         try:
@@ -1610,12 +1640,10 @@ class WorkflowService:
 
         return {
             'message': mensaje,
-            'requiere_accion_adicional': requiere_cgr,
+            'requiere_accion_adicional': False,
             'datos_adicionales': {
-                'director_finanzas': user_name,
-                'monto_aprobado': float(mision.monto_aprobado),
-                'monto_refrendo_cgr': float(monto_refrendo_cgr),
-                'requiere_refrendo_cgr': requiere_cgr
+                'vicepresidente_finanzas': user_name,
+                'monto_aprobado': float(mision.monto_aprobado)
             }
         }
     
@@ -2259,6 +2287,9 @@ class WorkflowService:
             target_states.append('PENDIENTE_REVISION_TESORERIA')
             # Tesorería puede ver devoluciones de tesorería
             target_states.append('DEVUELTO_CORRECCION_TESORERIA')
+            # NUEVO: Tesorería puede ver solicitudes después de presupuesto (para confeccionar cheque)
+            target_states.append('PENDIENTE_REFRENDO_CGR')
+            target_states.append('APROBADO_PARA_PAGO')
         
         # Solo permitir ver PENDIENTE_ASIGNACION_PRESUPUESTO si tiene el permiso MISSION_PRESUPUESTO_VIEW
         if self._has_permission(user, 'MISSION_PRESUPUESTO_VIEW'):  
@@ -2276,6 +2307,9 @@ class WorkflowService:
             target_states.append('PENDIENTE_APROBACION_FINANZAS')
             # Finanzas puede ver devoluciones de finanzas
             target_states.append('DEVUELTO_CORRECCION_FINANZAS')
+            # NUEVO: Finanzas puede ver solicitudes después de presupuesto (para firmar cheque)
+            target_states.append('PENDIENTE_REFRENDO_CGR')
+            target_states.append('APROBADO_PARA_PAGO')
         elif self._can_approve_missions(user):
             target_states.append('PENDIENTE_APROBACION_FINANZAS')
             # Si tiene permiso general de aprobación, puede ver devoluciones de finanzas
@@ -2332,6 +2366,9 @@ class WorkflowService:
                 pago_filters.append(and_(EstadoFlujo.nombre_estado == 'APROBADO_PARA_PAGO', Mision.tipo_mision == TipoMision.VIATICOS))
             if self._has_permission(user, 'MISSION_PAYMMENT'):
                 pago_filters.append(and_(EstadoFlujo.nombre_estado == 'APROBADO_PARA_PAGO', Mision.tipo_mision == TipoMision.CAJA_MENUDA))
+            # NUEVO: Tesorería y Finanzas pueden ver Viáticos en APROBADO_PARA_PAGO (para confeccionar/firmar cheque)
+            if self._has_permission(user, 'MISSION_TESORERIA_APPROVE') or self._has_permission(user, 'MISSION_DIR_FINANZAS_APPROVE'):
+                pago_filters.append(and_(EstadoFlujo.nombre_estado == 'APROBADO_PARA_PAGO', Mision.tipo_mision == TipoMision.VIATICOS))
         if 'PAGADO' in target_states:
             if self._has_permission(user, 'MISSION_VIATICOS_PAYMENT'):
                 pago_filters.append(and_(EstadoFlujo.nombre_estado == 'PAGADO', Mision.tipo_mision == TipoMision.VIATICOS))
@@ -2559,62 +2596,46 @@ class WorkflowService:
                 print(f"DEBUG: tipo_mision={mision.tipo_mision} ({type(mision.tipo_mision)}), estado_actual={estado_actual}")
                 print(f"DEBUG: _states_cache keys disponibles: {list(self._states_cache.keys())}")
                 
-                if mision.tipo_mision == TipoMision.VIATICOS:
-                    print("DEBUG: Transición a PENDIENTE_REVISION_TESORERIA")
-                    if 'PENDIENTE_REVISION_TESORERIA' in self._states_cache:
-                        return self._states_cache['PENDIENTE_REVISION_TESORERIA'].id_estado_flujo
-                    else:
-                        print("ERROR: PENDIENTE_REVISION_TESORERIA no encontrado en caché")
-                        return mision.id_estado_flujo
-                elif mision.tipo_mision == TipoMision.CAJA_MENUDA:
-                    print("DEBUG: Transición a APROBADO_PARA_PAGO")
-                    if 'APROBADO_PARA_PAGO' in self._states_cache:
-                        return self._states_cache['APROBADO_PARA_PAGO'].id_estado_flujo
-                    else:
-                        print("ERROR: APROBADO_PARA_PAGO no encontrado en caché")
-                        return mision.id_estado_flujo
+                # NUEVO FLUJO: Ambos tipos van a Vicepresidente de Finanzas primero
+                print("DEBUG: Transición a PENDIENTE_APROBACION_FINANZAS")
+                if 'PENDIENTE_APROBACION_FINANZAS' in self._states_cache:
+                    return self._states_cache['PENDIENTE_APROBACION_FINANZAS'].id_estado_flujo
                 else:
-                    print("DEBUG: Transición por defecto a PENDIENTE_REVISION_TESORERIA")
-                    if 'PENDIENTE_REVISION_TESORERIA' in self._states_cache:
-                        return self._states_cache['PENDIENTE_REVISION_TESORERIA'].id_estado_flujo
-                    else:
-                        print("ERROR: PENDIENTE_REVISION_TESORERIA no encontrado en caché")
-                        return mision.id_estado_flujo
-            elif estado_actual == 'PENDIENTE_REVISION_TESORERIA':
+                    print("ERROR: PENDIENTE_APROBACION_FINANZAS no encontrado en caché")
+                    return mision.id_estado_flujo
+            elif estado_actual == 'PENDIENTE_APROBACION_FINANZAS':
+                # NUEVO FLUJO: Vicepresidente dirige según tipo
                 if mision.tipo_mision == TipoMision.CAJA_MENUDA:
+                    print("DEBUG: VP Finanzas -> Caja Menuda va a APROBADO_PARA_PAGO")
                     return self._states_cache['APROBADO_PARA_PAGO'].id_estado_flujo
                 else:
-                    return self._states_cache['PENDIENTE_ASIGNACION_PRESUPUESTO'].id_estado_flujo
+                    print("DEBUG: VP Finanzas -> Viáticos va a PENDIENTE_REVISION_TESORERIA")
+                    return self._states_cache['PENDIENTE_REVISION_TESORERIA'].id_estado_flujo
+            elif estado_actual == 'PENDIENTE_REVISION_TESORERIA':
+                # Viáticos: Tesorería -> Presupuesto
+                return self._states_cache['PENDIENTE_ASIGNACION_PRESUPUESTO'].id_estado_flujo
             elif estado_actual == 'PENDIENTE_ASIGNACION_PRESUPUESTO':
-                print("DEBUG: _states_cache keys:", list(self._states_cache.keys()))
-                print("DEBUG: PENDIENTE_CONTABILIDAD in cache?", 'PENDIENTE_CONTABILIDAD' in self._states_cache)
-                if 'PENDIENTE_CONTABILIDAD' in self._states_cache:
-                    return self._states_cache['PENDIENTE_CONTABILIDAD'].id_estado_flujo
-                else:
-                    print("ERROR: Estado 'PENDIENTE_CONTABILIDAD' no encontrado en _states_cache")
-                    return mision.id_estado_flujo
-            elif estado_actual == 'PENDIENTE_CONTABILIDAD':
-                return self._states_cache['PENDIENTE_APROBACION_FINANZAS'].id_estado_flujo
-            elif estado_actual == 'PENDIENTE_APROBACION_FINANZAS':
-                return self._states_cache['APROBADO_PARA_PAGO'].id_estado_flujo  # O CGR según monto
+                # NUEVO FLUJO: Presupuesto va directo a APROBADO_PARA_PAGO (sin Contabilidad)
+                print("DEBUG: Presupuesto -> APROBADO_PARA_PAGO (sin Contabilidad)")
+                return self._states_cache['APROBADO_PARA_PAGO'].id_estado_flujo
             elif estado_actual == 'PENDIENTE_REFRENDO_CGR':
                 return self._states_cache['APROBADO_PARA_PAGO'].id_estado_flujo
             elif estado_actual == 'APROBADO_PARA_PAGO':
                 return self._states_cache['PAGADO'].id_estado_flujo
             # Estados de devolución específicos - permitir aprobar desde devoluciones
             elif estado_actual == 'DEVUELTO_CORRECCION_JEFE':
-                return self._states_cache['PENDIENTE_REVISION_TESORERIA'].id_estado_flujo
+                return self._states_cache['PENDIENTE_APROBACION_FINANZAS'].id_estado_flujo
             elif estado_actual == 'DEVUELTO_CORRECCION_TESORERIA':
+                return self._states_cache['PENDIENTE_ASIGNACION_PRESUPUESTO'].id_estado_flujo
+            elif estado_actual == 'DEVUELTO_CORRECCION_PRESUPUESTO':
+                # NUEVO FLUJO: Presupuesto va directo a APROBADO_PARA_PAGO
+                return self._states_cache['APROBADO_PARA_PAGO'].id_estado_flujo
+            elif estado_actual == 'DEVUELTO_CORRECCION_FINANZAS':
+                # NUEVO FLUJO: Vicepresidente dirige según tipo
                 if mision.tipo_mision == TipoMision.CAJA_MENUDA:
                     return self._states_cache['APROBADO_PARA_PAGO'].id_estado_flujo
                 else:
-                    return self._states_cache['PENDIENTE_ASIGNACION_PRESUPUESTO'].id_estado_flujo
-            elif estado_actual == 'DEVUELTO_CORRECCION_PRESUPUESTO':
-                return self._states_cache['PENDIENTE_CONTABILIDAD'].id_estado_flujo
-            elif estado_actual == 'DEVUELTO_CORRECCION_CONTABILIDAD':
-                return self._states_cache['PENDIENTE_APROBACION_FINANZAS'].id_estado_flujo
-            elif estado_actual == 'DEVUELTO_CORRECCION_FINANZAS':
-                return self._states_cache['APROBADO_PARA_PAGO'].id_estado_flujo
+                    return self._states_cache['PENDIENTE_REVISION_TESORERIA'].id_estado_flujo
             elif estado_actual == 'DEVUELTO_CORRECCION_CGR':
                 return self._states_cache['APROBADO_PARA_PAGO'].id_estado_flujo
         elif action_upper == 'RECHAZAR':
@@ -2632,53 +2653,35 @@ class WorkflowService:
         """
         Determina el estado de devolución específico según el estado actual.
         Implementa la lógica de devolución según el flujo de trabajo.
+        NUEVO FLUJO: Jefe -> VP Finanzas -> Tesorería -> Presupuesto -> [CGR] -> Pago
         """
         if estado_actual == 'PENDIENTE_JEFE':
             # Si está en PENDIENTE JEFE, devuelve a DEVUELTO_CORRECCION (estado general)
             return self._states_cache['DEVUELTO_CORRECCION'].id_estado_flujo
         
-        elif estado_actual == 'PENDIENTE_REVISION_TESORERIA':
-            # Si está en PENDIENTE TESORERIA, pasa a DEVUELTO_CORRECCION_JEFE
+        elif estado_actual == 'PENDIENTE_APROBACION_FINANZAS':
+            # NUEVO FLUJO: VP Finanzas devuelve a Jefe
             if 'DEVUELTO_CORRECCION_JEFE' in self._states_cache:
                 return self._states_cache['DEVUELTO_CORRECCION_JEFE'].id_estado_flujo
             else:
-                # Fallback a DEVUELTO_CORRECCION si no existe DEVUELTO_CORRECCION_JEFE
                 return self._states_cache['DEVUELTO_CORRECCION'].id_estado_flujo
         
-        elif estado_actual == 'PENDIENTE_ASIGNACION_PRESUPUESTO':
-            # Si está en PENDIENTE PRESUPUESTO, pasa a DEVUELTO_CORRECCION_TESORERIA
-            if 'DEVUELTO_CORRECCION_TESORERIA' in self._states_cache:
-                return self._states_cache['DEVUELTO_CORRECCION_TESORERIA'].id_estado_flujo
+        elif estado_actual == 'PENDIENTE_REVISION_TESORERIA':
+            # NUEVO FLUJO: Tesorería devuelve directamente al Jefe (NO a Finanzas)
+            if 'DEVUELTO_CORRECCION_JEFE' in self._states_cache:
+                return self._states_cache['DEVUELTO_CORRECCION_JEFE'].id_estado_flujo
             else:
-                # Fallback a DEVUELTO_CORRECCION si no existe DEVUELTO_CORRECCION_TESORERIA
-                return self._states_cache['DEVUELTO_CORRECCION'].id_estado_flujo
-        
-        elif estado_actual == 'PENDIENTE_CONTABILIDAD':
-            # Si está en PENDIENTE CONTABILIDAD, pasa a DEVUELTO_CORRECCION_PRESUPUESTO
-            if 'DEVUELTO_CORRECCION_PRESUPUESTO' in self._states_cache:
-                return self._states_cache['DEVUELTO_CORRECCION_PRESUPUESTO'].id_estado_flujo
-            else:
-                # Fallback a DEVUELTO_CORRECCION si no existe DEVUELTO_CORRECCION_PRESUPUESTO
-                return self._states_cache['DEVUELTO_CORRECCION'].id_estado_flujo
-        
-        elif estado_actual == 'PENDIENTE_APROBACION_FINANZAS':
-            # Si está en PENDIENTE FINANZAS, pasa a DEVUELTO_CORRECCION_CONTABILIDAD
-            if 'DEVUELTO_CORRECCION_CONTABILIDAD' in self._states_cache:
-                return self._states_cache['DEVUELTO_CORRECCION_CONTABILIDAD'].id_estado_flujo
-            else:
-                # Fallback a DEVUELTO_CORRECCION si no existe DEVUELTO_CORRECCION_CONTABILIDAD
                 return self._states_cache['DEVUELTO_CORRECCION'].id_estado_flujo
         
         elif estado_actual == 'PENDIENTE_REFRENDO_CGR':
-            # Si está en PENDIENTE CGR, pasa a DEVUELTO_CORRECCION_FINANZAS
-            if 'DEVUELTO_CORRECCION_FINANZAS' in self._states_cache:
-                return self._states_cache['DEVUELTO_CORRECCION_FINANZAS'].id_estado_flujo
+            # NUEVO FLUJO: CGR devuelve directamente al Jefe (Presupuesto no puede devolver)
+            if 'DEVUELTO_CORRECCION_JEFE' in self._states_cache:
+                return self._states_cache['DEVUELTO_CORRECCION_JEFE'].id_estado_flujo
             else:
-                # Fallback a DEVUELTO_CORRECCION si no existe DEVUELTO_CORRECCION_FINANZAS
                 return self._states_cache['DEVUELTO_CORRECCION'].id_estado_flujo
         
         elif estado_actual == 'APROBADO_PARA_PAGO':
-            # Si está en APROBADO PAGO, determina si va a DEVUELTO_CORRECCION_CGR o DEVUELTO_CORRECCION_FINANZAS
+            # Si está en APROBADO PAGO, determina si va a DEVUELTO_CORRECCION_CGR o DEVUELTO_CORRECCION_JEFE
             # según la misma validación que determina si va a PENDIENTE_CGR
             monto_refrendo = self._get_system_configuration('MONTO_REFRENDO_CGR', 5000.0)
             
@@ -2687,49 +2690,31 @@ class WorkflowService:
                 if 'DEVUELTO_CORRECCION_CGR' in self._states_cache:
                     return self._states_cache['DEVUELTO_CORRECCION_CGR'].id_estado_flujo
                 else:
-                    # Fallback a DEVUELTO_CORRECCION_FINANZAS si no existe DEVUELTO_CORRECCION_CGR
-                    if 'DEVUELTO_CORRECCION_FINANZAS' in self._states_cache:
-                        return self._states_cache['DEVUELTO_CORRECCION_FINANZAS'].id_estado_flujo
-                    else:
-                        return self._states_cache['DEVUELTO_CORRECCION'].id_estado_flujo
+                    return self._states_cache['DEVUELTO_CORRECCION'].id_estado_flujo
             else:
-                # Si no requiere refrendo CGR, devuelve a DEVUELTO_CORRECCION_FINANZAS
-                if 'DEVUELTO_CORRECCION_FINANZAS' in self._states_cache:
-                    return self._states_cache['DEVUELTO_CORRECCION_FINANZAS'].id_estado_flujo
+                # NUEVO FLUJO: Si no requiere refrendo CGR, devuelve directamente al Jefe
+                if 'DEVUELTO_CORRECCION_JEFE' in self._states_cache:
+                    return self._states_cache['DEVUELTO_CORRECCION_JEFE'].id_estado_flujo
                 else:
                     return self._states_cache['DEVUELTO_CORRECCION'].id_estado_flujo
         
         # Estados de devolución - cuando ya está devuelto, devolver al estado anterior
         elif estado_actual == 'DEVUELTO_CORRECCION_CGR':
-            # Si está en DEVUELTO CGR, pasa a DEVUELTO_CORRECCION_FINANZAS
-            if 'DEVUELTO_CORRECCION_FINANZAS' in self._states_cache:
-                return self._states_cache['DEVUELTO_CORRECCION_FINANZAS'].id_estado_flujo
+            # NUEVO FLUJO: DEVUELTO CGR -> DEVUELTO JEFE (Presupuesto no puede devolver)
+            if 'DEVUELTO_CORRECCION_JEFE' in self._states_cache:
+                return self._states_cache['DEVUELTO_CORRECCION_JEFE'].id_estado_flujo
             else:
                 return self._states_cache['DEVUELTO_CORRECCION'].id_estado_flujo
         
         elif estado_actual == 'DEVUELTO_CORRECCION_FINANZAS':
-            # Si está en DEVUELTO FINANZAS, pasa a DEVUELTO_CORRECCION_CONTABILIDAD
-            if 'DEVUELTO_CORRECCION_CONTABILIDAD' in self._states_cache:
-                return self._states_cache['DEVUELTO_CORRECCION_CONTABILIDAD'].id_estado_flujo
-            else:
-                return self._states_cache['DEVUELTO_CORRECCION'].id_estado_flujo
-        
-        elif estado_actual == 'DEVUELTO_CORRECCION_CONTABILIDAD':
-            # Si está en DEVUELTO CONTABILIDAD, pasa a DEVUELTO_CORRECCION_PRESUPUESTO
-            if 'DEVUELTO_CORRECCION_PRESUPUESTO' in self._states_cache:
-                return self._states_cache['DEVUELTO_CORRECCION_PRESUPUESTO'].id_estado_flujo
-            else:
-                return self._states_cache['DEVUELTO_CORRECCION'].id_estado_flujo
-        
-        elif estado_actual == 'DEVUELTO_CORRECCION_PRESUPUESTO':
-            # Si está en DEVUELTO PRESUPUESTO, pasa a DEVUELTO_CORRECCION_TESORERIA
-            if 'DEVUELTO_CORRECCION_TESORERIA' in self._states_cache:
-                return self._states_cache['DEVUELTO_CORRECCION_TESORERIA'].id_estado_flujo
+            # NUEVO FLUJO: DEVUELTO FINANZAS -> DEVUELTO JEFE
+            if 'DEVUELTO_CORRECCION_JEFE' in self._states_cache:
+                return self._states_cache['DEVUELTO_CORRECCION_JEFE'].id_estado_flujo
             else:
                 return self._states_cache['DEVUELTO_CORRECCION'].id_estado_flujo
         
         elif estado_actual == 'DEVUELTO_CORRECCION_TESORERIA':
-            # Si está en DEVUELTO TESORERIA, pasa a DEVUELTO_CORRECCION_JEFE
+            # NUEVO FLUJO: DEVUELTO TESORERIA -> DEVUELTO JEFE (no Finanzas)
             if 'DEVUELTO_CORRECCION_JEFE' in self._states_cache:
                 return self._states_cache['DEVUELTO_CORRECCION_JEFE'].id_estado_flujo
             else:
@@ -2758,11 +2743,13 @@ class WorkflowService:
         elif estado_actual == 'PENDIENTE_JEFE':
             is_jefe = self._is_jefe_inmediato(user)
             print(f"🔍 DEBUG _can_perform_action - PENDIENTE_JEFE: is_jefe={is_jefe}, action_upper={action_upper}")
-            return is_jefe and action_upper in ['APROBAR', 'RECHAZAR', 'DEVOLVER', 'APROBAR_DIRECTO']
+            # NUEVO FLUJO: Jefe NO puede aprobar directo (solo flujo completo)
+            return is_jefe and action_upper in ['APROBAR', 'RECHAZAR', 'DEVOLVER']
         
         elif estado_actual == 'DEVUELTO_CORRECCION_JEFE':
             is_jefe = self._is_jefe_inmediato(user)
-            return is_jefe and action_upper in ['APROBAR', 'RECHAZAR', 'APROBAR_DIRECTO', 'DEVOLVER']
+            # NUEVO FLUJO: Jefe NO puede aprobar directo (solo flujo completo)
+            return is_jefe and action_upper in ['APROBAR', 'RECHAZAR', 'DEVOLVER']
         
         elif estado_actual == 'DEVUELTO_CORRECCION_TESORERIA':
             return (
@@ -2795,7 +2782,8 @@ class WorkflowService:
             )
         
         elif estado_actual == 'PENDIENTE_ASIGNACION_PRESUPUESTO':
-            return (self._can_view_presupuesto(user) and action_upper in ['APROBAR', 'RECHAZAR', 'DEVOLVER'])
+            # NUEVO FLUJO: Presupuesto solo puede APROBAR o RECHAZAR (NO devolver)
+            return (self._can_view_presupuesto(user) and action_upper in ['APROBAR', 'RECHAZAR'])
         
         elif estado_actual == 'PENDIENTE_CONTABILIDAD':
             return (self._can_view_contabilidad(user) and action_upper in ['APROBAR', 'RECHAZAR', 'DEVOLVER'])

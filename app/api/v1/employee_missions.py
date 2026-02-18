@@ -1,21 +1,30 @@
+import os
+import uuid
 from typing import List, Optional
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 import json
 
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Request, UploadFile, File, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from ...core.database import get_db_financiero, get_db_rrhh
 from ...core.exceptions import BusinessException, ValidationException
 from ...api.deps import get_current_employee
-from ...models.mission import Mision as MisionModel, EstadoFlujo
+from ...models.mission import Mision as MisionModel, EstadoFlujo, Adjunto
 from ...schemas.mission import *
+from ...models.enums import TipoMision, TipoDocumento
 
 # Esquemas específicos para empleados
 from pydantic import BaseModel, Field, validator
-from ...models.enums import TipoMision
+
+# --- Configuración de Archivos ---
+UPLOAD_DIR = "uploads/missions"
+ALLOWED_EXTENSIONS = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".png", ".jpg", ".jpeg"}
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 router = APIRouter(
     prefix="/employee/missions",
@@ -1390,7 +1399,11 @@ async def get_mission_details(
             } if mision.estado_flujo else None,
             "can_edit": mision.id_estado_flujo in [11, 8],  # PENDIENTE_JEFE, DEVUELTO_CORRECCION
             "created_at": mision.created_at.isoformat() if mision.created_at else None,
-            "updated_at": mision.updated_at.isoformat() if mision.updated_at else None
+            "updated_at": mision.updated_at.isoformat() if mision.updated_at else None,
+            
+            # Campos para tracking de estado del cheque (solo para Viáticos)
+            "cheque_confeccionado": mision.cheque_confeccionado or False,
+            "cheque_firmado": mision.cheque_firmado or False
         }
         
         # DETALLES ESPECÍFICOS SEGÚN EL TIPO (igual que antes)
@@ -1502,6 +1515,30 @@ async def get_mission_details(
                 "viaticosCompletos": viaticos_caja_menuda,
                 "destino_codnivel2": mision.destino_codnivel2
             }
+        
+        # Obtener archivos adjuntos
+        adjuntos_result = db_financiero.execute(text("""
+            SELECT id_adjunto, nombre_archivo, nombre_original, url_almacenamiento,
+                   tipo_mime, tamano_bytes, tipo_documento, fecha_carga
+            FROM adjuntos 
+            WHERE id_mision = :id_mision
+            ORDER BY fecha_carga DESC
+        """), {"id_mision": mission_id})
+        
+        adjuntos = []
+        for row in adjuntos_result.fetchall():
+            adjuntos.append({
+                "id_adjunto": row.id_adjunto,
+                "nombre_archivo": row.nombre_archivo,
+                "nombre_original": row.nombre_original,
+                "url_almacenamiento": row.url_almacenamiento,
+                "tipo_mime": row.tipo_mime,
+                "tamano_bytes": row.tamano_bytes,
+                "tipo_documento": row.tipo_documento,
+                "fecha_carga": row.fecha_carga.isoformat() if row.fecha_carga else None
+            })
+        
+        mission_data["adjuntos"] = adjuntos
         
         return {
             "success": True,
@@ -1622,7 +1659,11 @@ async def get_mission_details_public(
                 "descripcion": mision.estado_flujo.descripcion
             } if mision.estado_flujo else None,
             "created_at": mision.created_at.isoformat() if mision.created_at else None,
-            "updated_at": mision.updated_at.isoformat() if mision.updated_at else None
+            "updated_at": mision.updated_at.isoformat() if mision.updated_at else None,
+            
+            # Campos para tracking de estado del cheque (solo para Viáticos)
+            "cheque_confeccionado": mision.cheque_confeccionado or False,
+            "cheque_firmado": mision.cheque_firmado or False
         }
         
         # DETALLES ESPECÍFICOS SEGÚN EL TIPO
@@ -1789,6 +1830,30 @@ async def get_mission_details_public(
         
         mission_data["historial"] = historial
         mission_data["partidas_presupuestarias"] = partidas_presupuestarias
+        
+        # Obtener archivos adjuntos
+        adjuntos_result = db_financiero.execute(text("""
+            SELECT id_adjunto, nombre_archivo, nombre_original, url_almacenamiento,
+                   tipo_mime, tamano_bytes, tipo_documento, fecha_carga
+            FROM adjuntos 
+            WHERE id_mision = :id_mision
+            ORDER BY fecha_carga DESC
+        """), {"id_mision": mission_id})
+        
+        adjuntos = []
+        for row in adjuntos_result.fetchall():
+            adjuntos.append({
+                "id_adjunto": row.id_adjunto,
+                "nombre_archivo": row.nombre_archivo,
+                "nombre_original": row.nombre_original,
+                "url_almacenamiento": row.url_almacenamiento,
+                "tipo_mime": row.tipo_mime,
+                "tamano_bytes": row.tamano_bytes,
+                "tipo_documento": row.tipo_documento,
+                "fecha_carga": row.fecha_carga.isoformat() if row.fecha_carga else None
+            })
+        
+        mission_data["adjuntos"] = adjuntos
         
         return {
             "success": True,
@@ -2182,3 +2247,141 @@ def get_jefe_inmediato_personal_id(beneficiary_personal_id: int, db_rrhh: Sessio
     except Exception as e:
         print(f"Error obteniendo jefe inmediato: {str(e)}")
         return None
+
+
+# --- Endpoint para adjuntar archivos ---
+
+@router.post("/{mission_id}/attachments", summary="Subir archivos adjuntos a una solicitud")
+async def upload_attachments_employee(
+    mission_id: int,
+    files: List[UploadFile] = File(..., description="Lista de archivos a subir (máximo 10 en total por solicitud)"),
+    tipo_documento: TipoDocumento = Query(TipoDocumento.OTRO),
+    db_financiero: Session = Depends(get_db_financiero),
+    db_rrhh: Session = Depends(get_db_rrhh),
+    current_employee: dict = Depends(get_current_employee)
+):
+    """
+    Sube uno o varios archivos y los asocia a una solicitud existente del empleado.
+    
+    **Restricciones:**
+    - Máximo 10 archivos por solicitud (contando los existentes)
+    - Cada archivo máximo 10MB
+    - Solo el empleado que creó la solicitud puede adjuntar archivos
+    - Tipos permitidos: pdf, doc, docx, xls, xlsx, png, jpg, jpeg
+    """
+    # Obtener personal_id del empleado
+    cedula = current_employee.get("cedula")
+    if not cedula:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No se pudo identificar la cédula del empleado"
+        )
+    
+    personal_id = get_employee_personal_id(cedula, db_rrhh)
+    
+    # Verificar que la misión existe y pertenece al empleado
+    mission = db_financiero.query(MisionModel).filter(
+        MisionModel.id_mision == mission_id
+    ).first()
+    
+    if not mission:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Solicitud no encontrada")
+    
+    # Verificar que el empleado es el beneficiario/creador de la solicitud
+    if mission.beneficiario_personal_id != personal_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo el empleado que creó la solicitud puede adjuntar archivos."
+        )
+    
+    # Contar archivos existentes
+    archivos_existentes = db_financiero.query(Adjunto).filter(
+        Adjunto.id_mision == mission_id
+    ).count()
+    
+    # Validar que no se exceda el límite de 10 archivos
+    if archivos_existentes >= 10:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"La solicitud ya tiene el máximo de 10 archivos permitidos."
+        )
+    
+    if archivos_existentes + len(files) > 10:
+        archivos_disponibles = 10 - archivos_existentes
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Solo puede subir {archivos_disponibles} archivo(s) más. La solicitud ya tiene {archivos_existentes} archivo(s)."
+        )
+    
+    if not files:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Debe proporcionar al menos un archivo."
+        )
+    
+    uploaded_attachments = []
+    
+    for file in files:
+        # Validar que el archivo tenga nombre
+        if not file.filename:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Uno de los archivos no tiene nombre válido."
+            )
+        
+        # Validar extensión
+        file_extension = os.path.splitext(file.filename)[1].lower()
+        if file_extension not in ALLOWED_EXTENSIONS:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Tipo de archivo no permitido: {file.filename}. Extensiones permitidas: {', '.join(ALLOWED_EXTENSIONS)}"
+            )
+        
+        # Leer contenido
+        contents = await file.read()
+        
+        # Validar tamaño
+        if len(contents) > MAX_FILE_SIZE:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Archivo demasiado grande: {file.filename}. Tamaño máximo: 10MB."
+            )
+        
+        # Generar nombre único y guardar
+        unique_filename = f"{mission_id}_{uuid.uuid4()}{file_extension}"
+        file_path = os.path.join(UPLOAD_DIR, unique_filename)
+        
+        with open(file_path, "wb") as buffer:
+            buffer.write(contents)
+        
+        # Obtener usuario para auditoría
+        id_usuario = get_usuario_for_employee(personal_id, db_financiero)
+        
+        # Crear registro en base de datos
+        attachment = Adjunto(
+            id_mision=mission_id,
+            nombre_archivo=unique_filename,
+            nombre_original=file.filename,
+            url_almacenamiento=f"/uploads/missions/{unique_filename}",
+            tipo_mime=file.content_type or "application/octet-stream",
+            tamano_bytes=len(contents),
+            tipo_documento=tipo_documento,
+            id_usuario_subio=id_usuario
+        )
+        db_financiero.add(attachment)
+        uploaded_attachments.append({
+            "id_adjunto": attachment.id_adjunto,
+            "nombre_original": file.filename,
+            "url": f"/uploads/missions/{unique_filename}",
+            "tamano_bytes": len(contents)
+        })
+    
+    db_financiero.commit()
+    
+    return {
+        "success": True,
+        "message": f"{len(uploaded_attachments)} archivo(s) subido(s) exitosamente.",
+        "archivos_subidos": len(uploaded_attachments),
+        "archivos_totales": archivos_existentes + len(uploaded_attachments),
+        "adjuntos": uploaded_attachments
+    }

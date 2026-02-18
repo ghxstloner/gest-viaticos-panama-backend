@@ -12,6 +12,7 @@ from ...core.exceptions import WorkflowException, BusinessException, PermissionE
 from ...api.deps import get_current_user, get_current_user_universal, get_current_employee
 from ...models.user import Usuario
 from ...models.mission import EstadoFlujo, TransicionFlujo, HistorialFlujo, Mision
+from ...models.enums import TipoMision
 from ...schemas.workflow import *
 from ...services.workflow_service import WorkflowService
 from ...api.v1.missions import get_beneficiary_names
@@ -20,6 +21,7 @@ from ...schemas.workflow import PartidaPresupuestariaBase, PartidaPresupuestaria
 from ...api.deps import get_current_user
 from ...models.user import Usuario
 from ...schemas.workflow import PartidaPresupuestariaCatalogoCreate, PartidaPresupuestariaResponse
+from ...schemas.mission import ChequeStatusUpdate, ChequeStatusResponse
 
 # Configurar logger
 logger = logging.getLogger(__name__)
@@ -604,6 +606,13 @@ async def jefe_approve_direct_payment(
         
         # Obtener y validar la misión
         mision = workflow_service._get_mission_with_validation(mission_id, current_user)
+        
+        # NUEVO FLUJO: Validar que NO sea Viáticos (solo Caja Menuda puede aprobarse directo)
+        if mision.tipo_mision == TipoMision.VIATICOS:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Las solicitudes de Viáticos deben seguir el flujo completo de aprobación"
+            )
         
         # Solo validar supervisión si es empleado
         if isinstance(current_user, dict):
@@ -1298,6 +1307,160 @@ async def debug_user_permissions_complete(
             "error": str(e),
             "traceback": traceback.format_exc()
         }
+
+
+# ===============================================
+# ENDPOINTS PARA CHECKS DE CHEQUE (VIÁTICOS)
+# ===============================================
+
+@router.get("/missions/{mission_id}/cheque", response_model=ChequeStatusResponse)
+async def get_cheque_status(
+    mission_id: int,
+    db: Session = Depends(get_db_financiero),
+    current_user = Depends(get_current_user_universal)
+):
+    """
+    Obtiene el estado de los checks del cheque para una misión de viáticos.
+    """
+    try:
+        if not current_user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Usuario no autenticado"
+            )
+        
+        # Obtener la misión
+        mision = db.query(Mision).filter(Mision.id_mision == mission_id).first()
+        
+        if not mision:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Misión {mission_id} no encontrada"
+            )
+        
+        # Validar que sea Viáticos
+        if mision.tipo_mision != TipoMision.VIATICOS:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Los checks de cheque solo aplican a Viáticos"
+            )
+        
+        return ChequeStatusResponse(
+            mission_id=mision.id_mision,
+            numero_solicitud=mision.numero_solicitud,
+            tipo_mision=mision.tipo_mision,
+            cheque_confeccionado=mision.cheque_confeccionado or False,
+            cheque_firmado=mision.cheque_firmado or False,
+            message="Estado del cheque obtenido exitosamente"
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al obtener estado del cheque: {str(e)}"
+        )
+
+
+@router.patch("/missions/{mission_id}/cheque", response_model=ChequeStatusResponse)
+async def update_cheque_status(
+    mission_id: int,
+    request_data: ChequeStatusUpdate,
+    db: Session = Depends(get_db_financiero),
+    current_user = Depends(get_current_user_universal)
+):
+    """
+    Actualiza el estado de los checks del cheque para una misión de viáticos.
+    
+    Permisos:
+    - cheque_confeccionado: Solo Tesorería (MISSION_TESORERIA_APPROVE)
+    - cheque_firmado: Solo Finanzas (MISSION_DIR_FINANZAS_APPROVE)
+    """
+    try:
+        if not current_user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Usuario no autenticado"
+            )
+        
+        # Obtener la misión
+        mision = db.query(Mision).filter(Mision.id_mision == mission_id).first()
+        
+        if not mision:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Misión {mission_id} no encontrada"
+            )
+        
+        # Validar que sea Viáticos
+        if mision.tipo_mision != TipoMision.VIATICOS:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Los checks de cheque solo aplican a Viáticos"
+            )
+        
+        # Validar estado de la misión - solo se pueden marcar checks después de que Presupuesto apruebe
+        estados_permitidos = ['PENDIENTE_REFRENDO_CGR', 'APROBADO_PARA_PAGO', 'PAGADO']
+        estado_actual = mision.estado_flujo.nombre_estado if mision.estado_flujo else None
+        
+        if estado_actual not in estados_permitidos:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"No se pueden marcar los checks del cheque en el estado actual '{estado_actual}'. "
+                   f"Solo se permiten en los estados: {', '.join(estados_permitidos)}"
+            )
+        
+        updated_fields = []
+        
+        # Validar y actualizar cheque_confeccionado (solo Tesorería)
+        if request_data.cheque_confeccionado is not None:
+            if not has_permission(current_user, 'MISSION_TESORERIA_APPROVE'):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Permiso requerido: MISSION_TESORERIA_APPROVE para modificar 'cheque_confeccionado'"
+                )
+            mision.cheque_confeccionado = request_data.cheque_confeccionado
+            updated_fields.append(f"cheque_confeccionado={request_data.cheque_confeccionado}")
+        
+        # Validar y actualizar cheque_firmado (solo Finanzas)
+        if request_data.cheque_firmado is not None:
+            if not has_permission(current_user, 'MISSION_DIR_FINANZAS_APPROVE'):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Permiso requerido: MISSION_DIR_FINANZAS_APPROVE para modificar 'cheque_firmado'"
+                )
+            mision.cheque_firmado = request_data.cheque_firmado
+            updated_fields.append(f"cheque_firmado={request_data.cheque_firmado}")
+        
+        # Si no se envió ningún campo para actualizar
+        if not updated_fields:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Debe proporcionar al menos un campo para actualizar (cheque_confeccionado o cheque_firmado)"
+            )
+        
+        # Guardar cambios
+        db.commit()
+        db.refresh(mision)
+        
+        return ChequeStatusResponse(
+            mission_id=mision.id_mision,
+            numero_solicitud=mision.numero_solicitud,
+            tipo_mision=mision.tipo_mision,
+            cheque_confeccionado=mision.cheque_confeccionado or False,
+            cheque_firmado=mision.cheque_firmado or False,
+            message=f"Campos actualizados: {', '.join(updated_fields)}"
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al actualizar estado del cheque: {str(e)}"
+        )
 
 @router.get("/debug/mission/{mission_id}/state")
 async def debug_mission_state(

@@ -805,45 +805,111 @@ async def get_workflow_states(db: Session = Depends(get_db_financiero)):
     return db.query(EstadoFlujo).order_by(EstadoFlujo.orden_flujo).all()
 
 
-@router.post("/{mission_id}/attachments/", response_model=AttachmentUpload, summary="Subir un archivo adjunto")
-async def upload_attachment(
+@router.post("/{mission_id}/attachments/", response_model=List[AttachmentUpload], summary="Subir archivos adjuntos a una misión")
+async def upload_attachments(
     mission_id: int,
-    file: UploadFile = File(...),
+    files: List[UploadFile] = File(..., description="Lista de archivos a subir (máximo 10 en total por solicitud)"),
     tipo_documento: TipoDocumento = Query(TipoDocumento.OTRO),
     db: Session = Depends(get_db_financiero),
     current_user: Usuario = Depends(get_current_user)
 ):
-    """Sube un archivo y lo asocia a una misión existente."""
+    """
+    Sube uno o varios archivos y los asocia a una misión existente.
+    
+    **Restricciones:**
+    - Máximo 10 archivos por solicitud (contando los existentes)
+    - Cada archivo máximo 10MB
+    - Solo el usuario que creó la solicitud puede adjuntar archivos
+    - Tipos permitidos: pdf, doc, docx, xls, xlsx, png, jpg, jpeg
+    """
+    # Verificar que la misión existe
     mission = db.query(MisionModel).filter(MisionModel.id_mision == mission_id).first()
     if not mission:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Misión no encontrada")
-
-    file_extension = os.path.splitext(file.filename)[1].lower()
-    if file_extension not in ALLOWED_EXTENSIONS:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Tipo de archivo no permitido.")
-
-    contents = await file.read()
-    if len(contents) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Archivo demasiado grande.")
-
-    unique_filename = f"{mission_id}_{uuid.uuid4()}{file_extension}"
-    file_path = os.path.join(UPLOAD_DIR, unique_filename)
-
-    with open(file_path, "wb") as buffer:
-        buffer.write(contents)
-
-    attachment = Adjunto(
-        id_mision=mission_id,
-        nombre_archivo=unique_filename,
-        nombre_original=file.filename,
-        url_almacenamiento=f"/uploads/missions/{unique_filename}",
-        tipo_mime=file.content_type,
-        tamano_bytes=len(contents),
-        tipo_documento=tipo_documento,
-        id_usuario_subio=current_user.id_usuario
-    )
-    db.add(attachment)
+    
+    # Verificar que el usuario es el creador de la solicitud
+    if mission.id_usuario_prepara != current_user.id_usuario:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo el usuario que creó la solicitud puede adjuntar archivos."
+        )
+    
+    # Contar archivos existentes
+    archivos_existentes = db.query(Adjunto).filter(Adjunto.id_mision == mission_id).count()
+    
+    # Validar que no se exceda el límite de 10 archivos
+    if archivos_existentes >= 10:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"La solicitud ya tiene el máximo de 10 archivos permitidos."
+        )
+    
+    if archivos_existentes + len(files) > 10:
+        archivos_disponibles = 10 - archivos_existentes
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Solo puede subir {archivos_disponibles} archivo(s) más. La solicitud ya tiene {archivos_existentes} archivo(s)."
+        )
+    
+    if not files:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Debe proporcionar al menos un archivo."
+        )
+    
+    uploaded_attachments = []
+    
+    for file in files:
+        # Validar que el archivo tenga nombre
+        if not file.filename:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Uno de los archivos no tiene nombre válido."
+            )
+        
+        # Validar extensión
+        file_extension = os.path.splitext(file.filename)[1].lower()
+        if file_extension not in ALLOWED_EXTENSIONS:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Tipo de archivo no permitido: {file.filename}. Extensiones permitidas: {', '.join(ALLOWED_EXTENSIONS)}"
+            )
+        
+        # Leer contenido
+        contents = await file.read()
+        
+        # Validar tamaño
+        if len(contents) > MAX_FILE_SIZE:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Archivo demasiado grande: {file.filename}. Tamaño máximo: 10MB."
+            )
+        
+        # Generar nombre único y guardar
+        unique_filename = f"{mission_id}_{uuid.uuid4()}{file_extension}"
+        file_path = os.path.join(UPLOAD_DIR, unique_filename)
+        
+        with open(file_path, "wb") as buffer:
+            buffer.write(contents)
+        
+        # Crear registro en base de datos
+        attachment = Adjunto(
+            id_mision=mission_id,
+            nombre_archivo=unique_filename,
+            nombre_original=file.filename,
+            url_almacenamiento=f"/uploads/missions/{unique_filename}",
+            tipo_mime=file.content_type or "application/octet-stream",
+            tamano_bytes=len(contents),
+            tipo_documento=tipo_documento,
+            id_usuario_subio=current_user.id_usuario
+        )
+        db.add(attachment)
+        uploaded_attachments.append(attachment)
+    
     db.commit()
-    db.refresh(attachment)
-
-    return attachment
+    
+    # Refrescar todos los objetos adjuntos
+    for attachment in uploaded_attachments:
+        db.refresh(attachment)
+    
+    return uploaded_attachments

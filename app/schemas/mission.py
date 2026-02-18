@@ -297,6 +297,10 @@ class Mision(BaseModel):
     id_finanzas: Optional[int] = None
     id_jefe: Optional[int] = None
     
+    # Campos para tracking de estado del cheque (solo para Viáticos)
+    cheque_confeccionado: Optional[bool] = False
+    cheque_firmado: Optional[bool] = False
+    
     estado_flujo: "EstadoFlujo"
     items_viaticos: List[ItemViatico] = []
     items_transporte: List[ItemTransporte] = []
@@ -488,3 +492,30 @@ class UserParticipationsResponse(BaseModel):
     size: int
     pages: int
     stats: Dict[str, Any]
+
+
+# --- Esquemas para Check de Cheque (solo Viáticos) ---
+class ChequeStatusUpdate(BaseModel):
+    """Schema para actualizar el estado de los checks del cheque"""
+    cheque_confeccionado: Optional[bool] = Field(
+        None, 
+        description="Indica si el cheque ya fue confeccionado"
+    )
+    cheque_firmado: Optional[bool] = Field(
+        None,
+        description="Indica si el cheque ya fue firmado"
+    )
+    
+    @validator('cheque_confeccionado', 'cheque_firmado')
+    def validate_not_none(cls, v):
+        """Valida que al menos un campo sea proporcionado"""
+        return v
+
+class ChequeStatusResponse(BaseModel):
+    """Schema para respuesta del estado de los checks del cheque"""
+    mission_id: int
+    numero_solicitud: Optional[str] = None
+    tipo_mision: TipoMision
+    cheque_confeccionado: bool
+    cheque_firmado: bool
+    message: str

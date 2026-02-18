@@ -90,6 +90,10 @@ class Mision(Base, TimestampMixin):
     id_contabilidad: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     id_finanzas: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     id_jefe: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    
+    # Campos para tracking de estado del cheque (solo para Viáticos)
+    cheque_confeccionado: Mapped[Optional[bool]] = mapped_column(Boolean, default=False, nullable=True)
+    cheque_firmado: Mapped[Optional[bool]] = mapped_column(Boolean, default=False, nullable=True)
 
     # --- Relationships ---
     estado_flujo: Mapped["EstadoFlujo"] = relationship("EstadoFlujo", back_populates="misiones")

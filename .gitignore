@@ -48,6 +48,7 @@ htmlcov/
 .coverage.*
 nosetests.xml
 coverage.xml
+.uploads/
 
 # ####################################
 # ## Archivos de IDE y Editores
