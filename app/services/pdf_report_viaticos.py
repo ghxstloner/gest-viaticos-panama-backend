@@ -210,7 +210,7 @@ class PDFReportViaticosService:
         try:
             from sqlalchemy import text
             result = self.db.execute(text("""
-                SELECT apenom FROM aitsa_rrhh.nompersonal 
+                SELECT apenom FROM nompersonal 
                 WHERE personal_id = :personal_id
             """), {"personal_id": personal_id})
             row = result.fetchone()
@@ -226,7 +226,7 @@ class PDFReportViaticosService:
             result = self.db.execute(text("""
                 SELECT np.apenom 
                 FROM usuarios u
-                JOIN aitsa_rrhh.nompersonal np ON u.personal_id_rrhh = np.personal_id
+                JOIN nompersonal np ON u.personal_id_rrhh = np.personal_id
                 WHERE u.id_usuario = :user_id
             """), {"user_id": user_id})
             row = result.fetchone()
@@ -312,7 +312,7 @@ class PDFReportViaticosService:
         try:
             from sqlalchemy import text
             result = self.db.execute(text("""
-                SELECT apenom FROM aitsa_rrhh.nompersonal 
+                SELECT apenom FROM nompersonal 
                 WHERE personal_id = :personal_id
             """), {"personal_id": personal_id})
             row = result.fetchone()
@@ -332,8 +332,8 @@ class PDFReportViaticosService:
                     np.apenom,
                     np.nomposicion_id,
                     npos.descripcion_posicion
-                FROM aitsa_rrhh.nompersonal np
-                LEFT JOIN aitsa_rrhh.nomposicion npos ON np.nomposicion_id = npos.nomposicion_id
+                FROM nompersonal np
+                LEFT JOIN nomposicion npos ON np.nomposicion_id = npos.nomposicion_id
                 WHERE np.personal_id = :personal_id
             """
             print(f"🔍 _get_beneficiary_details - Query: {query}")
@@ -379,8 +379,8 @@ class PDFReportViaticosService:
             from sqlalchemy import text
             query = """
                 SELECT n1.descrip 
-                FROM aitsa_rrhh.nompersonal np
-                JOIN aitsa_rrhh.nomnivel1 n1 ON np.codnivel1 = n1.codorg
+                FROM nompersonal np
+                JOIN nomnivel1 n1 ON np.codnivel1 = n1.codorg
                 WHERE np.personal_id = :personal_id
             """
             print(f"🔍 _get_beneficiary_vicepresidency - Query: {query}")
@@ -407,9 +407,9 @@ class PDFReportViaticosService:
             query = """
                 SELECT 
                     vp_chief.apenom
-                FROM aitsa_rrhh.nompersonal beneficiario
-                JOIN aitsa_rrhh.nomnivel1 vicepresidencia ON beneficiario.codnivel1 = vicepresidencia.codorg
-                JOIN aitsa_rrhh.nompersonal vp_chief ON vicepresidencia.personal_id = vp_chief.personal_id
+                FROM nompersonal beneficiario
+                JOIN nomnivel1 vicepresidencia ON beneficiario.codnivel1 = vicepresidencia.codorg
+                JOIN nompersonal vp_chief ON vicepresidencia.personal_id = vp_chief.personal_id
                 WHERE beneficiario.personal_id = :beneficiario_personal_id
             """
             print(f"🔍 _get_vicepresidency_chief_name - Query: {query}")

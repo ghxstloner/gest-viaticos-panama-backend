@@ -16,7 +16,7 @@ class EmployeeAuthService:
         self.db_financiero = db_financiero  # Base de datos financiera para permisos
 
     def authenticate_employee(self, cedula: str, password: str) -> Optional[dict]:
-        """Autentica a un empleado desde la tabla nompersonal de aitsa_rrhh."""
+        """Autentica a un empleado desde la tabla nompersonal de RRHH."""
         try:
             query = text("""
                 SELECT personal_id, cedula, apenom, estado, usr_password, email, telefonos, IdDepartamento
@@ -50,7 +50,7 @@ class EmployeeAuthService:
         try:
             query = text("""
                 SELECT COUNT(*) as count
-                FROM aitsa_rrhh.departamento_aprobadores_maestros dam
+                FROM departamento_aprobadores_maestros dam
                 WHERE dam.cedula_aprobador = :cedula
                   AND dam.orden_aprobador = 1
             """)
@@ -66,8 +66,8 @@ class EmployeeAuthService:
         try:
             query = text("""
                 SELECT d.IdDepartamento, d.Descripcion
-                FROM aitsa_rrhh.departamento d
-                JOIN aitsa_rrhh.departamento_aprobadores_maestros dam
+                FROM departamento d
+                JOIN departamento_aprobadores_maestros dam
                   ON dam.id_departamento = d.IdDepartamento
                  AND dam.orden_aprobador = 1
                 WHERE dam.cedula_aprobador = :cedula

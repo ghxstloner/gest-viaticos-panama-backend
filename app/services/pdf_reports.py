@@ -365,7 +365,7 @@ class PDFReportService:
         try:
             from sqlalchemy import text
             result = self.db.execute(text("""
-                SELECT apenom FROM aitsa_rrhh.nompersonal 
+                SELECT apenom FROM nompersonal 
                 WHERE personal_id = :personal_id
             """), {"personal_id": personal_id})
             row = result.fetchone()
@@ -379,8 +379,8 @@ class PDFReportService:
             from sqlalchemy import text
             query = """
                 SELECT d.Descripcion 
-                FROM aitsa_rrhh.nompersonal np
-                LEFT JOIN aitsa_rrhh.departamento d ON np.IdDepartamento = d.IdDepartamento
+                FROM nompersonal np
+                LEFT JOIN departamento d ON np.IdDepartamento = d.IdDepartamento
                 WHERE np.personal_id = :personal_id
             """
             result = self.db.execute(text(query), {"personal_id": personal_id})

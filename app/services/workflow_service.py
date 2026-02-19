@@ -2181,7 +2181,7 @@ class WorkflowService:
     
     def get_budget_items_catalog(self) -> List[PartidaPresupuestariaResponse]:
         """
-        Obtiene el catálogo de partidas presupuestarias desde aitsa_rrhh.cwprecue
+        Obtiene el catálogo de partidas presupuestarias desde cwprecue
         """
         if not self.db_rrhh:
             raise BusinessException("No hay conexión con la base de datos de RRHH")
@@ -2189,7 +2189,7 @@ class WorkflowService:
         try:
             result = self.db_rrhh.execute(text("""
                 SELECT CodCue, Denominacion
-                FROM aitsa_rrhh.cwprecue 
+                FROM cwprecue 
                 ORDER BY CodCue
             """))
             
@@ -2482,8 +2482,8 @@ class WorkflowService:
         # Nueva lógica: jefe inmediato es quien tiene orden_aprobador = 1 en departamento_aprobadores_maestros
         result = self.db_rrhh.execute(text("""
             SELECT np.personal_id
-            FROM aitsa_rrhh.nompersonal np
-            JOIN aitsa_rrhh.departamento_aprobadores_maestros dam
+            FROM nompersonal np
+            JOIN departamento_aprobadores_maestros dam
               ON dam.id_departamento = np.IdDepartamento
              AND dam.orden_aprobador = 1
             WHERE dam.cedula_aprobador = :jefe_cedula
@@ -2817,8 +2817,8 @@ class WorkflowService:
         # Nueva validación: jefe válido es quien esté como orden_aprobador = 1 para el departamento del beneficiario
         result = self.db_rrhh.execute(text("""
             SELECT np.IdDepartamento, dam.cedula_aprobador AS CedulaJefeInmediato, np.apenom
-            FROM aitsa_rrhh.nompersonal np
-            JOIN aitsa_rrhh.departamento_aprobadores_maestros dam
+            FROM nompersonal np
+            JOIN departamento_aprobadores_maestros dam
               ON dam.id_departamento = np.IdDepartamento
              AND dam.orden_aprobador = 1
             WHERE np.personal_id = :personal_id
@@ -2843,7 +2843,7 @@ class WorkflowService:
         codigos = [p.codigo_partida for p in partidas]
         
         result = self.db_rrhh.execute(
-            text("SELECT CodCue FROM aitsa_rrhh.cwprecue WHERE CodCue IN :codigos").bindparams(bindparam("codigos", expanding=True)),
+            text("SELECT CodCue FROM cwprecue WHERE CodCue IN :codigos").bindparams(bindparam("codigos", expanding=True)),
             {"codigos": codigos}
         )
         
@@ -2868,7 +2868,7 @@ class WorkflowService:
                 # Verificar que sea su propia misión
                 if self.db_rrhh:
                     result = self.db_rrhh.execute(text("""
-                        SELECT personal_id FROM aitsa_rrhh.nompersonal 
+                        SELECT personal_id FROM nompersonal 
                         WHERE cedula = :cedula
                     """), {"cedula": cedula})
                     employee = result.fetchone()
@@ -3115,7 +3115,7 @@ class WorkflowService:
         # Obtener personal_id del empleado
         cedula = employee.get('cedula')
         result = self.db_rrhh.execute(text("""
-            SELECT personal_id FROM aitsa_rrhh.nompersonal 
+            SELECT personal_id FROM nompersonal 
             WHERE cedula = :cedula
         """), {"cedula": cedula})
         
@@ -3306,7 +3306,7 @@ class WorkflowService:
             beneficiary_result = self.db_rrhh.execute(
                 text("""
                     SELECT cedula, IdDepartamento
-                    FROM aitsa_rrhh.nompersonal
+                    FROM nompersonal
                     WHERE personal_id = :personal_id
                 """),
                 {"personal_id": beneficiary_personal_id}
@@ -3323,7 +3323,7 @@ class WorkflowService:
             jefe_result = self.db_rrhh.execute(
                 text("""
                     SELECT dam.cedula_aprobador
-                    FROM aitsa_rrhh.departamento_aprobadores_maestros dam
+                    FROM departamento_aprobadores_maestros dam
                     WHERE dam.id_departamento = :departamento
                       AND dam.orden_aprobador = 1
                     LIMIT 1
@@ -3341,7 +3341,7 @@ class WorkflowService:
             jefe_personal_result = self.db_rrhh.execute(
                 text("""
                     SELECT personal_id
-                    FROM aitsa_rrhh.nompersonal
+                    FROM nompersonal
                     WHERE cedula = :cedula
                 """),
                 {"cedula": jefe_cedula}

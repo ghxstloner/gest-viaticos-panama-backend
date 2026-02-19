@@ -1058,7 +1058,7 @@ async def create_budget_item(
     try:
         db_rrhh.execute(
             text("""
-                INSERT INTO aitsa_rrhh.cwprecue (CodCue, Denominacion, Tipocta, Tipopuc)
+                INSERT INTO cwprecue (CodCue, Denominacion, Tipocta, Tipopuc)
                 VALUES (:codcue, :denominacion, 0, '0')
             """),
             {

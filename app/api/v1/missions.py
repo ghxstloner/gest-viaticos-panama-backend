@@ -65,7 +65,7 @@ def get_beneficiary_names(db_rrhh: Session, personal_ids: List[int]) -> Dict[int
     
     query = text(f"""
         SELECT personal_id, apenom
-        FROM aitsa_rrhh.nompersonal 
+        FROM nompersonal 
         WHERE personal_id {condition}
         AND estado != 'De Baja'
     """)
@@ -252,9 +252,9 @@ async def get_employee_missions(
                 detail="No se pudo identificar la cédula del empleado"
             )
         
-        # Buscar personal_id en RRHH usando esquema completo
+        # Buscar personal_id en RRHH
         result = db_rrhh.execute(text("""
-            SELECT personal_id FROM aitsa_rrhh.nompersonal 
+            SELECT personal_id FROM nompersonal 
             WHERE cedula = :cedula AND estado != 'De Baja'
         """), {"cedula": cedula})
         
@@ -387,7 +387,7 @@ async def get_employee_mission_detail(
         # Verificar que la misión pertenece al empleado
         cedula = current_employee.get("cedula")
         result = db_rrhh.execute(text("""
-            SELECT personal_id FROM aitsa_rrhh.nompersonal 
+            SELECT personal_id FROM nompersonal 
             WHERE cedula = :cedula AND estado != 'De Baja'
         """), {"cedula": cedula})
         
@@ -500,7 +500,7 @@ async def get_mission(
                 db_rrhh = next(get_db_rrhh())
                 result = db_rrhh.execute(text("""
                     SELECT personal_id, apenom, cedula, IdDepartamento
-                    FROM aitsa_rrhh.nompersonal 
+                    FROM nompersonal 
                     WHERE personal_id = :personal_id AND estado != 'De Baja'
                 """), {"personal_id": mision.beneficiario_personal_id})
                 
@@ -525,7 +525,7 @@ async def get_mission(
                     db_rrhh = next(get_db_rrhh())
                     result = db_rrhh.execute(text("""
                         SELECT personal_id, apenom, cedula
-                        FROM aitsa_rrhh.nompersonal 
+                        FROM nompersonal 
                         WHERE personal_id = :personal_id AND estado != 'De Baja'
                     """), {"personal_id": preparer_user.personal_id_rrhh})
                     

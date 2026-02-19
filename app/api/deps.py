@@ -160,7 +160,7 @@ def get_current_user_universal(
                 raise credentials_exception
             
             # Buscar el nombre del rol en la base de datos
-            role_query = text("SELECT nombre_rol FROM aitsa_financiero.roles WHERE id_rol = :id_rol")
+            role_query = text("SELECT nombre_rol FROM roles WHERE id_rol = :id_rol")
             role_result = db_financiero.execute(role_query, {"id_rol": id_rol})
             role_row = role_result.fetchone()
             role_name = role_row.nombre_rol if role_row else "Empleado"
@@ -233,7 +233,7 @@ def get_current_employee_with_role(
             raise credentials_exception
         
         # Buscar el nombre del rol en la base de datos
-        role_query = text("SELECT nombre_rol FROM aitsa_financiero.roles WHERE id_rol = :id_rol")
+        role_query = text("SELECT nombre_rol FROM roles WHERE id_rol = :id_rol")
         role_result = db_financiero.execute(role_query, {"id_rol": id_rol})
         role_row = role_result.fetchone()
         role_name = role_row.nombre_rol if role_row else "Empleado"

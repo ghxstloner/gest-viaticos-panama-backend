@@ -106,7 +106,7 @@ class PettyCashCreateRequest(BaseModel):
 def get_employee_personal_id(cedula: str, db_rrhh: Session) -> int:
     """Obtiene el personal_id del empleado desde RRHH"""
     result = db_rrhh.execute(text("""
-        SELECT personal_id FROM aitsa_rrhh.nompersonal 
+        SELECT personal_id FROM nompersonal 
         WHERE cedula = :cedula AND estado != 'De Baja'
     """), {"cedula": cedula})
     
@@ -160,7 +160,7 @@ def get_usuario_for_employee(personal_id: int, db_financiero: Session) -> int:
 def get_department_description(codigo_nivel2: str, db_rrhh: Session) -> str:
     """Obtiene la descripción del departamento"""
     result = db_rrhh.execute(text("""
-        SELECT descrip FROM aitsa_rrhh.nomnivel2 WHERE codorg = :codigo
+        SELECT descrip FROM nomnivel2 WHERE codorg = :codigo
     """), {"codigo": codigo_nivel2})
     
     dept_record = result.fetchone()
@@ -169,7 +169,7 @@ def get_department_description(codigo_nivel2: str, db_rrhh: Session) -> str:
 def get_system_config_value(clave: str, db: Session, default_value: str = "0") -> str:
     """Obtiene un valor de configuración del sistema"""
     result = db.execute(text("""
-        SELECT valor FROM aitsa_financiero.configuraciones_sistema 
+        SELECT valor FROM configuraciones_sistema 
         WHERE clave = :clave
     """), {"clave": clave})
     
@@ -189,7 +189,7 @@ def generate_request_number(db: Session) -> str:
         # Incrementar consecutivo para la próxima solicitud
         nuevo_consecutivo = consecutivo_actual + 1
         db.execute(text("""
-            UPDATE aitsa_financiero.configuraciones_sistema 
+            UPDATE configuraciones_sistema 
             SET valor = :nuevo_valor 
             WHERE clave = 'CONSECUTIVO_SOLICITUD'
         """), {"nuevo_valor": str(nuevo_consecutivo)})
@@ -896,7 +896,7 @@ async def get_organizational_structure(db_rrhh: Session = Depends(get_db_rrhh)):
         # Obtener nivel 1 (vicepresidencias)
         nivel1_result = db_rrhh.execute(text("""
             SELECT codorg, descrip 
-            FROM aitsa_rrhh.nomnivel1 
+            FROM nomnivel1 
             ORDER BY descrip
         """))
         
@@ -905,7 +905,7 @@ async def get_organizational_structure(db_rrhh: Session = Depends(get_db_rrhh)):
         # Obtener nivel 2 (departamentos)
         nivel2_result = db_rrhh.execute(text("""
             SELECT codorg, descrip, gerencia 
-            FROM aitsa_rrhh.nomnivel2 
+            FROM nomnivel2 
             ORDER BY descrip
         """))
         
@@ -1324,8 +1324,8 @@ async def get_mission_details(
             dept_result = db_rrhh.execute(text("""
                 SELECT n2.codorg, n2.descrip as dept_name, n2.gerencia,
                        n1.codorg as vice_codigo, n1.descrip as vice_name
-                FROM aitsa_rrhh.nomnivel2 n2
-                LEFT JOIN aitsa_rrhh.nomnivel1 n1 ON n2.gerencia = n1.codorg
+                FROM nomnivel2 n2
+                LEFT JOIN nomnivel1 n1 ON n2.gerencia = n1.codorg
                 WHERE n2.codorg = :codigo
             """), {"codigo": str(mision.destino_codnivel2)})
             
@@ -1348,7 +1348,7 @@ async def get_mission_details(
             beneficiario_result = db_rrhh.execute(text("""
                 SELECT personal_id, apenom, ficha, cedula, codcargo, nomposicion_id,
                        codnivel1, codnivel2
-                FROM aitsa_rrhh.nompersonal 
+                FROM nompersonal 
                 WHERE personal_id = :personal_id AND estado != 'De Baja'
             """), {"personal_id": mision.beneficiario_personal_id})
             
@@ -1585,8 +1585,8 @@ async def get_mission_details_public(
             dept_result = db_rrhh.execute(text("""
                 SELECT n2.codorg, n2.descrip as dept_name, n2.gerencia,
                        n1.codorg as vice_codigo, n1.descrip as vice_name
-                FROM aitsa_rrhh.nomnivel2 n2
-                LEFT JOIN aitsa_rrhh.nomnivel1 n1 ON n2.gerencia = n1.codorg
+                FROM nomnivel2 n2
+                LEFT JOIN nomnivel1 n1 ON n2.gerencia = n1.codorg
                 WHERE n2.codorg = :codigo
             """), {"codigo": str(mision.destino_codnivel2)})
             
@@ -1609,7 +1609,7 @@ async def get_mission_details_public(
             beneficiario_result = db_rrhh.execute(text("""
                 SELECT personal_id, apenom, ficha, cedula, codcargo, nomposicion_id,
                        codnivel1, codnivel2
-                FROM aitsa_rrhh.nompersonal 
+                FROM nompersonal 
                 WHERE personal_id = :personal_id AND estado != 'De Baja'
             """), {"personal_id": mision.beneficiario_personal_id})
             

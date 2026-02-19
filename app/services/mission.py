@@ -195,32 +195,33 @@ class MissionService:
         # Lógica de filtrado por rol
         if user.rol.nombre_rol == 'Jefe Inmediato':
             # 1. Obtener la cédula del jefe actual
-            jefe_cedula = self.db.query(text("cedula")).from_statement(
-                text("SELECT cedula FROM aitsa_rrhh.nompersonal WHERE personal_id = :pid")
-            ).params(pid=user.personal_id_rrhh).scalar()
+            jefe_cedula = self.db_rrhh.execute(
+                text("SELECT cedula FROM nompersonal WHERE personal_id = :pid"),
+                {"pid": user.personal_id_rrhh}
+            ).scalar()
 
             if jefe_cedula:
                 # 2. Obtener los IDs de los departamentos donde es jefe inmediato (orden_aprobador = 1)
-                deptos_managed_query = self.db.query(text("IdDepartamento")).from_statement(
-                    text(
-                        """
+                deptos_managed_result = self.db_rrhh.execute(
+                    text("""
                         SELECT d.IdDepartamento
-                        FROM aitsa_rrhh.departamento d
-                        JOIN aitsa_rrhh.departamento_aprobadores_maestros dam
+                        FROM departamento d
+                        JOIN departamento_aprobadores_maestros dam
                           ON dam.id_departamento = d.IdDepartamento
                          AND dam.orden_aprobador = 1
                         WHERE dam.cedula_aprobador = :jefe_cedula
-                        """
-                    )
-                ).params(jefe_cedula=jefe_cedula)
-                deptos_managed_ids = [row[0] for row in deptos_managed_query.all()]
+                    """),
+                    {"jefe_cedula": jefe_cedula}
+                )
+                deptos_managed_ids = [row[0] for row in deptos_managed_result.fetchall()]
 
                 if deptos_managed_ids:
                     # 3. Obtener los IDs de todos los empleados en esos departamentos
-                    employees_in_depts_query = self.db.query(text("personal_id")).from_statement(
-                        text("SELECT personal_id FROM aitsa_rrhh.nompersonal WHERE IdDepartamento IN :depto_ids")
-                    ).params(depto_ids=tuple(deptos_managed_ids))
-                    employee_ids = [row[0] for row in employees_in_depts_query.all()]
+                    employees_in_depts_result = self.db_rrhh.execute(
+                        text("SELECT personal_id FROM nompersonal WHERE IdDepartamento IN :depto_ids"),
+                        {"depto_ids": tuple(deptos_managed_ids)}
+                    )
+                    employee_ids = [row[0] for row in employees_in_depts_result.fetchall()]
                     
                     # 4. Filtrar misiones por los empleados gestionados
                     if employee_ids:
@@ -387,11 +388,11 @@ class MissionService:
                     p.personal_id, p.apenom, p.ficha, p.cedula,
                     p.codcargo, p.nomposicion_id, f.descripcion_funcion,
                     p.codnivel1, p.codnivel2
-                FROM aitsa_rrhh.nompersonal AS p
-                LEFT JOIN aitsa_rrhh.nomfuncion AS f ON p.nomfuncion_id = f.nomfuncion_id
+                FROM nompersonal AS p
+                LEFT JOIN nomfuncion AS f ON p.nomfuncion_id = f.nomfuncion_id
                 WHERE p.personal_id = :personal_id AND p.estado != 'De Baja'
             """)
-            result = self.db.execute(sql_query, {"personal_id": personal_id})
+            result = self.db_rrhh.execute(sql_query, {"personal_id": personal_id})
             row = result.mappings().first()
             return dict(row) if row else None
         except Exception as e:

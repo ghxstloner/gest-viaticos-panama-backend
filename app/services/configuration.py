@@ -248,7 +248,7 @@ class ConfigurationService:
             # Buscar por nombre o ficha
             result = self.db.execute(text("""
                 SELECT personal_id, apenom, ficha 
-                FROM aitsa_rrhh.nompersonal 
+                FROM nompersonal 
                 WHERE (apenom LIKE :query OR ficha LIKE :query_ficha) 
                   AND estado != 'De Baja'
                 ORDER BY apenom
@@ -277,7 +277,7 @@ class ConfigurationService:
         try:
             result = self.db.execute(text("""
                 SELECT personal_id, apenom, ficha 
-                FROM aitsa_rrhh.nompersonal 
+                FROM nompersonal 
                 WHERE personal_id = :personal_id AND estado != 'De Baja'
             """), {"personal_id": personal_id})
             

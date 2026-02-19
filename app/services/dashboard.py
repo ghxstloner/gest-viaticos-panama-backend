@@ -857,7 +857,7 @@ class DashboardService:
         try:
             from sqlalchemy import text
             result = self.db.execute(text("""
-                SELECT apenom FROM aitsa_rrhh.nompersonal 
+                SELECT apenom FROM nompersonal 
                 WHERE personal_id = :personal_id
             """), {"personal_id": personal_id})
             row = result.fetchone()

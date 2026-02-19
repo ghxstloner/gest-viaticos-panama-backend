@@ -52,9 +52,9 @@ def get_employee_dashboard(
             detail="No se pudo identificar la cédula del empleado desde el token."
         )
     
-    # Obtener personal_id desde RRHH usando el esquema completo
+    # Obtener personal_id desde RRHH
     result = db_rrhh.execute(text("""
-        SELECT personal_id FROM aitsa_rrhh.nompersonal 
+        SELECT personal_id FROM nompersonal 
         WHERE cedula = :cedula AND estado != 'De Baja'
     """), {"cedula": cedula})
     

@@ -508,7 +508,7 @@ class UserService:
         try:
             result = self.db.execute(text("""
                 SELECT personal_id 
-                FROM aitsa_rrhh.nompersonal 
+                FROM nompersonal 
                 WHERE personal_id = :personal_id AND estado != 'De Baja'
             """), {"personal_id": personal_id})
             
@@ -610,16 +610,16 @@ class UserService:
                         ' - ', 
                         IFNULL(t.hora_salida, '16:30:00')
                     ) as horario_trabajo
-                FROM aitsa_rrhh.nompersonal p
-                LEFT JOIN aitsa_rrhh.nomnivel1 n1 ON p.codnivel1 = n1.codorg
-                LEFT JOIN aitsa_rrhh.departamento d ON p.IdDepartamento = d.IdDepartamento
+                FROM nompersonal p
+                LEFT JOIN nomnivel1 n1 ON p.codnivel1 = n1.codorg
+                LEFT JOIN departamento d ON p.IdDepartamento = d.IdDepartamento
                 -- ✅ Nueva forma de jefe inmediato
-                LEFT JOIN aitsa_rrhh.departamento_aprobadores_maestros dam 
+                LEFT JOIN departamento_aprobadores_maestros dam 
                        ON dam.id_departamento = d.IdDepartamento AND dam.orden_aprobador = 1
-                LEFT JOIN aitsa_rrhh.nompersonal jefe ON dam.cedula_aprobador = jefe.cedula
-                LEFT JOIN aitsa_rrhh.nomfuncion f ON p.nomfuncion_id = f.nomfuncion_id + 0
-                LEFT JOIN aitsa_rrhh.jornadas j ON p.cod_jor = j.cod_jor AND j.activo = 1
-                LEFT JOIN aitsa_rrhh.turnos t ON p.turno_id = t.id
+                LEFT JOIN nompersonal jefe ON dam.cedula_aprobador = jefe.cedula
+                LEFT JOIN nomfuncion f ON p.nomfuncion_id = f.nomfuncion_id + 0
+                LEFT JOIN jornadas j ON p.cod_jor = j.cod_jor AND j.activo = 1
+                LEFT JOIN turnos t ON p.turno_id = t.id
                 WHERE p.personal_id = :personal_id AND p.estado != 'De Baja'
             """)
             
